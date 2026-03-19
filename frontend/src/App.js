@@ -36,9 +36,22 @@ function MiniBar({ value, max, color, bg }) {
   );
 }
 
+function isMarketOpen() {
+  const now = new Date();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return false;
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const totalMinutes = hours * 60 + minutes;
+  const marketOpen  = 9 * 60 + 30;
+  const marketClose = 16 * 60;
+  return totalMinutes >= marketOpen && totalMinutes < marketClose;
+}
+
 function PriceChart({ symbol, refreshTick }) {
-  const [data, setData]   = useState([]);
-  const [range, setRange] = useState('1D');
+  const [data, setData]       = useState([]);
+  const [range, setRange]     = useState('1D');
+  const marketOpen            = isMarketOpen();
 
   const RANGES = ['1D', '5D', '1M'];
 
@@ -51,7 +64,11 @@ function PriceChart({ symbol, refreshTick }) {
       if (range === '1D') {
         const todayStr = now.toISOString().slice(0, 10);
         filtered = all.filter(d => d.timestamp.slice(0, 10) === todayStr);
-        if (filtered.length === 0) filtered = all.slice(-20);
+        if (filtered.length === 0) {
+          // Market closed — show last trading day's full data
+          const lastDay = all.length > 0 ? all[all.length - 1].timestamp.slice(0, 10) : null;
+          filtered = lastDay ? all.filter(d => d.timestamp.slice(0, 10) === lastDay) : all.slice(-20);
+        }
       } else if (range === '5D') {
         const cutoff = new Date(now - 5 * 24 * 60 * 60 * 1000);
         filtered = all.filter(d => new Date(d.timestamp) >= cutoff);
@@ -61,19 +78,18 @@ function PriceChart({ symbol, refreshTick }) {
       }
 
       setData(filtered.map(d => {
-        const utc   = new Date(d.timestamp + 'Z');
-        const hh    = String(utc.getHours()).padStart(2, '0');
-        const min   = String(utc.getMinutes()).padStart(2, '0');
-        const mm    = String(utc.getMonth() + 1).padStart(2, '0');
-        const dd    = String(utc.getDate()).padStart(2, '0');
+        const utc = new Date(d.timestamp + 'Z');
+        const hh  = String(utc.getHours()).padStart(2, '0');
+        const min = String(utc.getMinutes()).padStart(2, '0');
+        const mm  = String(utc.getMonth() + 1).padStart(2, '0');
+        const dd  = String(utc.getDate()).padStart(2, '0');
         return {
           name:  range === '1D' ? `${hh}:${min}` : `${mm}-${dd}`,
           price: d.price,
-          full:  d.timestamp,
         };
       }));
     });
-  }, [symbol, refreshTick, range]);
+  }, [symbol, range, marketOpen ? refreshTick : 0]);
 
   if (data.length === 0) return (
     <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ccc', fontSize: 12 }}>
@@ -91,15 +107,20 @@ function PriceChart({ symbol, refreshTick }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 4, marginBottom: 4, justifyContent: 'flex-end' }}>
-        {RANGES.map(r => (
-          <button key={r} onClick={() => setRange(r)} style={{
-            padding: '2px 8px', borderRadius: 4, border: '1px solid #eee', cursor: 'pointer',
-            background: range === r ? COLORS.blue : '#f7f7f5',
-            color: range === r ? '#fff' : '#888',
-            fontSize: 10, fontWeight: 500
-          }}>{r}</button>
-        ))}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <span style={{ fontSize: 9, color: marketOpen ? COLORS.positive : '#bbb' }}>
+          {marketOpen ? 'Market open' : 'Market closed'}
+        </span>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {RANGES.map(r => (
+            <button key={r} onClick={() => setRange(r)} style={{
+              padding: '2px 8px', borderRadius: 4, border: '1px solid #eee', cursor: 'pointer',
+              background: range === r ? COLORS.blue : '#f7f7f5',
+              color: range === r ? '#fff' : '#888',
+              fontSize: 10, fontWeight: 500
+            }}>{r}</button>
+          ))}
+        </div>
       </div>
       <div style={{ width: '100%', height: 120 }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -129,7 +150,7 @@ function PriceChart({ symbol, refreshTick }) {
             />
             <Tooltip
               formatter={v => [`$${Number(v).toFixed(2)}`, 'Price']}
-              labelFormatter={l => range === '1D' ? `Today ${l}` : `Date: ${l}`}
+              labelFormatter={l => range === '1D' ? `${marketOpen ? 'Today' : 'Last session'} ${l}` : `Date: ${l}`}
               contentStyle={{ fontSize: 11, borderRadius: 6 }}
             />
           </LineChart>

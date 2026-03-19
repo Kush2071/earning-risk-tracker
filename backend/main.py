@@ -76,11 +76,16 @@ def search(q: str = Query(...), db: Session = Depends(get_db)):
 
 
 @app.get("/live-price/{symbol}")
+@app.get("/live-price/{symbol}")
 def live_price(symbol: str, db: Session = Depends(get_db)):
+    """
+    Get latest price from Finnhub and store snapshot.
+    prev_close = last price from previous trading day.
+    """
     try:
-        quote = get_quote(symbol.upper())
-        price = quote.get("c")
-        prev  = quote.get("pc")
+        quote  = get_quote(symbol.upper())
+        price  = quote.get("c")
+        pc     = quote.get("pc")  # Finnhub provides official prev close
 
         if price and price > 0:
             snapshot = PriceSnapshot(
@@ -97,9 +102,9 @@ def live_price(symbol: str, db: Session = Depends(get_db)):
         return {
             "symbol":     symbol.upper(),
             "price":      price,
-            "prev_close": prev,
-            "change":     round(price - prev, 2) if price and prev else None,
-            "change_pct": round((price - prev) / prev * 100, 2) if price and prev else None,
+            "prev_close": pc,
+            "change":     round(price - pc, 2) if price and pc else None,
+            "change_pct": round((price - pc) / pc * 100, 2) if price and pc else None,
         }
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}

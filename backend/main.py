@@ -37,10 +37,16 @@ app.add_middleware(
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
 
 
+def get_active_symbols_list(db):
+    """Get all unique symbols that have price data."""
+    rows = db.query(PriceSnapshot.symbol).distinct().all()
+    symbols = [r.symbol for r in rows]
+    return symbols if symbols else WATCHLIST
+
+
 @app.on_event("startup")
 def startup_event():
     start_scheduler()
-    # Auto-seed data on first boot if DB is empty
     db = next(get_db())
     try:
         count = db.query(PriceSnapshot).count()
@@ -71,21 +77,16 @@ def search(q: str = Query(...), db: Session = Depends(get_db)):
     try:
         results = search_symbols(q)
         return [{"symbol": r["symbol"], "name": r["description"]} for r in results]
-    except Exception as e:
+    except Exception:
         return []
 
 
 @app.get("/live-price/{symbol}")
-@app.get("/live-price/{symbol}")
 def live_price(symbol: str, db: Session = Depends(get_db)):
-    """
-    Get latest price from Finnhub and store snapshot.
-    prev_close = last price from previous trading day.
-    """
     try:
-        quote  = get_quote(symbol.upper())
-        price  = quote.get("c")
-        pc     = quote.get("pc")  # Finnhub provides official prev close
+        quote = get_quote(symbol.upper())
+        price = quote.get("c")
+        pc    = quote.get("pc")
 
         if price and price > 0:
             snapshot = PriceSnapshot(
@@ -170,6 +171,46 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
     compute_and_store_risk(db, s)
     ingest_sentiment(db, s)
     return {"status": "done", "symbol": s}
+
+
+@app.post("/ingest/seed-history")
+def seed_history(db: Session = Depends(get_db)):
+    """Seed 60 days of synthetic historical prices for all active symbols."""
+    symbols = get_active_symbols_list(db)
+    seeded  = []
+
+    for symbol in symbols:
+        count = db.query(PriceSnapshot).filter_by(symbol=symbol).count()
+        if count > 10:
+            print(f"[Seed] {symbol} already has {count} snapshots, skipping")
+            continue
+
+        price_row = db.query(PriceSnapshot).filter_by(symbol=symbol)\
+                      .order_by(PriceSnapshot.timestamp.desc()).first()
+        if not price_row:
+            continue
+
+        current_price = price_row.price
+        today = datetime.utcnow()
+
+        for i in range(60):
+            ret = random.gauss(0, 0.015)
+            synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
+            ts = today - timedelta(days=(60 - i))
+            db.add(PriceSnapshot(
+                symbol=symbol,
+                asset_class="equity",
+                price=round(synthetic_price, 2),
+                volume=None,
+                timestamp=ts,
+                is_delayed=True
+            ))
+
+        db.commit()
+        seeded.append(symbol)
+        print(f"[Seed] Seeded 60 days for {symbol}")
+
+    return {"status": "done", "seeded": seeded}
 
 
 @app.get("/earnings")

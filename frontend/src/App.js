@@ -450,7 +450,9 @@ function ExpectedMovePanel({ watchlist }) {
     ).then(setData);
   }, [watchlist]);
 
-  useEffect(() => { fetchData(days); }, [watchlist]);
+  useEffect(() => { 
+    fetchData(days); 
+}, [watchlist, days, fetchData]); // Add all dependencies
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
@@ -500,7 +502,9 @@ function PositionSizer({ watchlist }) {
     ).then(r => setResults(r.filter(x => x.shares)));
   }, [watchlist, portfolio, riskPct]);
 
-  useEffect(() => { calculate(); }, [watchlist]);
+  useEffect(() => { 
+    calculate(); 
+}, [watchlist, calculate]); // Add calculate to dependencies
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>

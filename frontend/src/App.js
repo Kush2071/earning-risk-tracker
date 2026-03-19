@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, ReferenceLine } from 'recharts';
 import axios from 'axios';
 
-const API = 'https://humorous-surprise-production-6641.up.railway.app';
+const API = 'https://earning-risk-tracker-production.up.railway.app';
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'];
 const REFRESH_INTERVAL  = 40000;
 

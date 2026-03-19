@@ -40,6 +40,20 @@ WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
 @app.on_event("startup")
 def startup_event():
     start_scheduler()
+    # Auto-seed data on first boot if DB is empty
+    db = next(get_db())
+    try:
+        count = db.query(PriceSnapshot).count()
+        if count == 0:
+            print("[Startup] Empty DB detected — running initial ingest...")
+            run_full_ingest(db, WATCHLIST)
+            for symbol in WATCHLIST:
+                compute_and_store_risk(db, symbol)
+            print("[Startup] Initial ingest complete")
+    except Exception as e:
+        print(f"[Startup] Ingest failed: {e}")
+    finally:
+        db.close()
 
 
 @app.on_event("shutdown")

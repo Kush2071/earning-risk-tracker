@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, ReferenceLine } from 'recharts';
 import axios from 'axios';
@@ -55,6 +56,8 @@ function PriceChart({ symbol, refreshTick }) {
 
   const RANGES = ['1D', '5D', '1M'];
 
+  const activeTick = marketOpen ? refreshTick : 0;
+
   useEffect(() => {
     axios.get(`${API}/prices/${symbol}`).then(res => {
       const all = res.data.reverse();
@@ -65,7 +68,6 @@ function PriceChart({ symbol, refreshTick }) {
         const todayStr = now.toISOString().slice(0, 10);
         filtered = all.filter(d => d.timestamp.slice(0, 10) === todayStr);
         if (filtered.length === 0) {
-          // Market closed — show last trading day's full data
           const lastDay = all.length > 0 ? all[all.length - 1].timestamp.slice(0, 10) : null;
           filtered = lastDay ? all.filter(d => d.timestamp.slice(0, 10) === lastDay) : all.slice(-20);
         }
@@ -89,7 +91,7 @@ function PriceChart({ symbol, refreshTick }) {
         };
       }));
     });
-  }, [symbol, range, marketOpen ? refreshTick : 0]);
+  }, [symbol, range, activeTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (data.length === 0) return (
     <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ccc', fontSize: 12 }}>

@@ -242,11 +242,11 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
     return {"status": "done", "symbol": s}
 
 @app.post("/ingest/seed-history")
-def seed_history(db: Session = Depends(get_db)):
-    """
-    Seed real historical prices for all active symbols.
-    Uses Finnhub candles, falls back to synthetic.
-    """
+def seed_history(
+    force: bool = Query(default=False, description="Force delete and reseed all symbols"),
+    db: Session = Depends(get_db)
+):
+    """Seed real historical prices for all active symbols."""
     symbols = get_active_symbols_list(db)
     seeded  = []
 
@@ -254,21 +254,36 @@ def seed_history(db: Session = Depends(get_db)):
         existing_count = db.query(PriceSnapshot)\
                            .filter_by(symbol=symbol).count()
 
-        if existing_count > 100:
-            print(f"[Seed] {symbol} already has {existing_count} snapshots, skipping")
+        if existing_count > 100 and not force:
+            print(f"[Seed] {symbol} has {existing_count} snapshots, use force=true to reseed")
             continue
 
+        # Delete all existing price data for this symbol
+        db.query(PriceSnapshot).filter_by(symbol=symbol).delete()
+        db.commit()
+        print(f"[Seed] Cleared {existing_count} snapshots for {symbol}")
+
+        # Fetch real historical daily candles
         print(f"[Seed] Fetching real history for {symbol}...")
         candles = get_historical_candles(symbol, days=60)
 
         if candles:
             print(f"[Seed] Got {len(candles)} real candles for {symbol}")
             for c in candles:
-                existing = db.query(PriceSnapshot).filter_by(
+                db.add(PriceSnapshot(
                     symbol=symbol,
-                    timestamp=c["timestamp"]
-                ).first()
-                if not existing:
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+            db.commit()
+
+            # Also get today's intraday data
+            intraday = get_intraday_candles(symbol)
+            if intraday:
+                for c in intraday:
                     db.add(PriceSnapshot(
                         symbol=symbol,
                         asset_class="equity",
@@ -277,18 +292,16 @@ def seed_history(db: Session = Depends(get_db)):
                         timestamp=c["timestamp"],
                         is_delayed=True
                     ))
-            db.commit()
-            seeded.append(f"{symbol}({len(candles)} real candles)")
+                db.commit()
+                print(f"[Seed] Added {len(intraday)} intraday candles for {symbol}")
+
+            seeded.append(f"{symbol}({len(candles)} real + {len(intraday) if intraday else 0} intraday)")
         else:
             print(f"[Seed] No Finnhub data for {symbol}, using synthetic")
-            price_row = db.query(PriceSnapshot).filter_by(symbol=symbol)\
-                          .order_by(PriceSnapshot.timestamp.desc()).first()
-            if not price_row:
-                continue
-            current_price = price_row.price
+            current_price = 100.0
             today = datetime.utcnow()
             for i in range(60):
-                ret = random.gauss(0, 0.015)
+                ret = random.gauss(0, 0.012)
                 synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
                 ts = today - timedelta(days=(60 - i))
                 db.add(PriceSnapshot(
@@ -308,6 +321,74 @@ def seed_history(db: Session = Depends(get_db)):
 
     return {"status": "done", "seeded": seeded}
 
+@app.post("/ingest/force-reseed/{symbol}")
+def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
+    """
+    Force delete ALL price data for a symbol and fetch fresh
+    real historical data from Finnhub.
+    """
+    s = symbol.upper()
+
+    # Count and delete everything
+    count = db.query(PriceSnapshot).filter_by(symbol=s).count()
+    db.query(PriceSnapshot).filter_by(symbol=s).delete()
+    db.commit()
+    print(f"[ForceReseed] Deleted {count} snapshots for {s}")
+
+    # Fetch real daily candles from Finnhub
+    candles = get_historical_candles(s, days=90)
+    daily_count = 0
+
+    if candles:
+        for c in candles:
+            db.add(PriceSnapshot(
+                symbol=s,
+                asset_class="equity",
+                price=round(c["price"], 2),
+                volume=None,
+                timestamp=c["timestamp"],
+                is_delayed=True
+            ))
+        db.commit()
+        daily_count = len(candles)
+        print(f"[ForceReseed] Added {daily_count} real daily candles for {s}")
+    else:
+        print(f"[ForceReseed] No Finnhub daily data for {s}")
+
+    # Fetch today's intraday candles
+    intraday = get_intraday_candles(s)
+    intraday_count = 0
+
+    if intraday:
+        for c in intraday:
+            db.add(PriceSnapshot(
+                symbol=s,
+                asset_class="equity",
+                price=round(c["price"], 2),
+                volume=None,
+                timestamp=c["timestamp"],
+                is_delayed=True
+            ))
+        db.commit()
+        intraday_count = len(intraday)
+        print(f"[ForceReseed] Added {intraday_count} intraday candles for {s}")
+
+    # Also get current live price
+    ingest_price_snapshot(db, s)
+
+    # Recompute risk
+    compute_and_store_risk(db, s)
+
+    total = db.query(PriceSnapshot).filter_by(symbol=s).count()
+
+    return {
+        "symbol":          s,
+        "deleted":         count,
+        "daily_candles":   daily_count,
+        "intraday_candles": intraday_count,
+        "total_snapshots": total,
+        "finnhub_data":    daily_count > 0
+    }
 
 @app.get("/earnings")
 def list_earnings(db: Session = Depends(get_db)):

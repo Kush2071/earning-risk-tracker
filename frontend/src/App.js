@@ -65,16 +65,24 @@ function PriceChart({ symbol, refreshTick }) {
 
       let filtered;
       if (range === '1D') {
-        const nowUTC    = new Date();
-        const todayStr  = nowUTC.toISOString().slice(0, 10);
-        const todayData = all.filter(d => d.timestamp.slice(0, 10) === todayStr);
+        const nowUTC = new Date();
+
+        // Try today first (UTC date)
+        const todayUTC = nowUTC.toISOString().slice(0, 10);
+        let todayData  = all.filter(d => d.timestamp.slice(0, 10) === todayUTC);
+
+        // Also try yesterday UTC (handles timezone edge cases at start of day)
+        if (todayData.length === 0) {
+          const yesterdayUTC = new Date(nowUTC - 24 * 60 * 60 * 1000)
+            .toISOString().slice(0, 10);
+          todayData = all.filter(d => d.timestamp.slice(0, 10) === yesterdayUTC);
+        }
 
         if (todayData.length > 0) {
-          // We have today's data — show full day whether market is open or closed
+          // Show full trading session — all snapshots from that day
           filtered = todayData;
         } else {
-          // No data yet for today (weekend, holiday, or before 9:30 AM)
-          // Show last available trading day's full session
+          // No data for today — show most recent trading day
           const dates   = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
           const lastDay = dates[dates.length - 1];
           filtered      = lastDay

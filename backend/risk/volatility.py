@@ -14,13 +14,23 @@ def calculate_returns(prices: List[float]) -> List[float]:
 
 
 def calculate_volatility(returns: List[float]) -> float:
+    """
+    Annualised volatility from daily log returns.
+    Filters out extreme returns that come from synthetic/bad data.
+    """
     if len(returns) < 2:
         return 0.0
-    n     = len(returns)
-    mean  = sum(returns) / n
-    var   = sum((r - mean) ** 2 for r in returns) / (n - 1)
+    # Filter out extreme returns (> 15% daily move) — these are synthetic artifacts
+    filtered = [r for r in returns if abs(r) < 0.15]
+    if len(filtered) < 2:
+        filtered = returns
+    n     = len(filtered)
+    mean  = sum(filtered) / n
+    var   = sum((r - mean) ** 2 for r in filtered) / (n - 1)
     daily = math.sqrt(var)
-    return round(daily * math.sqrt(252), 6)
+    ann   = round(daily * math.sqrt(252), 6)
+    # Cap at 150% annualised vol — anything above is data error
+    return min(ann, 1.50)
 
 
 def calculate_var_95(returns: List[float], price: float) -> float:

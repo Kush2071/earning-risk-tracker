@@ -65,11 +65,21 @@ function PriceChart({ symbol, refreshTick }) {
 
       let filtered;
       if (range === '1D') {
-        const todayStr = now.toISOString().slice(0, 10);
-        filtered = all.filter(d => d.timestamp.slice(0, 10) === todayStr);
-        if (filtered.length === 0) {
-          const lastDay = all.length > 0 ? all[all.length - 1].timestamp.slice(0, 10) : null;
-          filtered = lastDay ? all.filter(d => d.timestamp.slice(0, 10) === lastDay) : all.slice(-20);
+        const nowUTC    = new Date();
+        const todayStr  = nowUTC.toISOString().slice(0, 10);
+        const todayData = all.filter(d => d.timestamp.slice(0, 10) === todayStr);
+
+        if (todayData.length > 0) {
+          // We have today's data — show full day whether market is open or closed
+          filtered = todayData;
+        } else {
+          // No data yet for today (weekend, holiday, or before 9:30 AM)
+          // Show last available trading day's full session
+          const dates   = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
+          const lastDay = dates[dates.length - 1];
+          filtered      = lastDay
+            ? all.filter(d => d.timestamp.slice(0, 10) === lastDay)
+            : all.slice(-20);
         }
       } else if (range === '5D') {
         const cutoff = new Date(now - 5 * 24 * 60 * 60 * 1000);
@@ -171,14 +181,16 @@ function StockCard({ symbol, onRemove, refreshTick }) {
   const [livePrice, setLivePrice] = useState(null);
 
   useEffect(() => {
-    // Live price — keeps old value while fetching so no flicker
-    axios.get(`${API}/live-price/${symbol}`).then(res => {
-      if (res.data && res.data.price) {
-        setLivePrice(prev => ({ ...prev, ...res.data }));
-      }
-    }).catch(() => {});
+    // Only fetch live price during market hours
+    if (isMarketOpen()) {
+      axios.get(`${API}/live-price/${symbol}`).then(res => {
+        if (res.data && res.data.price) {
+          setLivePrice(prev => ({ ...prev, ...res.data }));
+        }
+      }).catch(() => {});
+    }
 
-    axios.get(`${API}/prices/${symbol}`).then(res => setPrices(res.data));
+    axios.get(`${API}/prices/${symbol}?limit=200`).then(res => setPrices(res.data));
     axios.get(`${API}/risk/${symbol}`).then(res => setRisk(res.data));
     axios.get(`${API}/expected-move/${symbol}?days=1`).then(res => setMove(res.data));
   }, [symbol, refreshTick]);
@@ -682,9 +694,11 @@ export default function App() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setRefreshTick(t => t + 1);
-      setLastUpdated(new Date().toLocaleTimeString());
-      setCountdown(40);
+      if (isMarketOpen()) {
+        setRefreshTick(t => t + 1);
+        setLastUpdated(new Date().toLocaleTimeString());
+        setCountdown(40);
+      }
     }, REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, []);
@@ -709,7 +723,7 @@ export default function App() {
         <div>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 500 }}>Earnings Risk Tracker</h1>
           <p style={{ margin: 0, fontSize: 13, color: '#888' }}>
-            15-min delayed · Updated {lastUpdated} · refreshing in {countdown}s
+            15-min delayed · Updated {lastUpdated} · {isMarketOpen() ? `refreshing in ${countdown}s` : 'market closed'}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>

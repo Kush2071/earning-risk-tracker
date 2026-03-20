@@ -13,7 +13,7 @@ from ingestion.ingest import (
     ingest_sentiment,
     run_full_ingest
 )
-from ingestion.finnhub import search_symbols, get_quote
+from ingestion.finnhub import search_symbols, get_quote, get_historical_candles, get_intraday_candles
 from risk.volatility import (
     compute_and_store_risk,
     calculate_returns,
@@ -146,11 +146,54 @@ def trigger_risk(db: Session = Depends(get_db)):
 
 @app.post("/ingest/symbol/{symbol}")
 def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
+    """
+    Add a new symbol — fetch real historical data from Finnhub,
+    fall back to synthetic if Finnhub returns nothing.
+    """
     s = symbol.upper()
+
+    # Step 1: get current price
     ingest_price_snapshot(db, s)
 
-    count = db.query(PriceSnapshot).filter_by(symbol=s).count()
-    if count < 10:
+    # Step 2: try to get real historical daily candles
+    print(f"[Seed] Fetching real historical data for {s}...")
+    candles = get_historical_candles(s, days=60)
+
+    if candles:
+        print(f"[Seed] Got {len(candles)} real candles for {s}")
+        for c in candles:
+            existing = db.query(PriceSnapshot).filter_by(
+                symbol=s,
+                timestamp=c["timestamp"]
+            ).first()
+            if not existing:
+                db.add(PriceSnapshot(
+                    symbol=s,
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+        db.commit()
+
+        # Also fetch today's intraday data
+        intraday = get_intraday_candles(s)
+        if intraday:
+            for c in intraday:
+                db.add(PriceSnapshot(
+                    symbol=s,
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+            db.commit()
+            print(f"[Seed] Added {len(intraday)} intraday candles for {s}")
+    else:
+        # Fallback to synthetic if Finnhub returns nothing
+        print(f"[Seed] No Finnhub data for {s}, using synthetic history")
         price_row = db.query(PriceSnapshot).filter_by(symbol=s)\
                       .order_by(PriceSnapshot.timestamp.desc()).first()
         if price_row:
@@ -166,49 +209,79 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                     volume=None, timestamp=ts, is_delayed=True
                 ))
             db.commit()
-            print(f"[Seed] Seeded 60 synthetic prices for {s}")
 
+    # Step 3: compute risk
     compute_and_store_risk(db, s)
-    ingest_sentiment(db, s)
-    return {"status": "done", "symbol": s}
 
+    # Step 4: sentiment
+    ingest_sentiment(db, s)
+
+    return {"status": "done", "symbol": s}
 
 @app.post("/ingest/seed-history")
 def seed_history(db: Session = Depends(get_db)):
-    """Seed 60 days of synthetic historical prices for all active symbols."""
+    """
+    Seed real historical prices for all active symbols.
+    Uses Finnhub candles, falls back to synthetic.
+    """
     symbols = get_active_symbols_list(db)
     seeded  = []
 
     for symbol in symbols:
-        count = db.query(PriceSnapshot).filter_by(symbol=symbol).count()
-        if count > 10:
-            print(f"[Seed] {symbol} already has {count} snapshots, skipping")
+        existing_count = db.query(PriceSnapshot)\
+                           .filter_by(symbol=symbol).count()
+
+        if existing_count > 30:
+            print(f"[Seed] {symbol} already has {existing_count} snapshots, skipping")
             continue
 
-        price_row = db.query(PriceSnapshot).filter_by(symbol=symbol)\
-                      .order_by(PriceSnapshot.timestamp.desc()).first()
-        if not price_row:
-            continue
+        print(f"[Seed] Fetching real history for {symbol}...")
+        candles = get_historical_candles(symbol, days=60)
 
-        current_price = price_row.price
-        today = datetime.utcnow()
+        if candles:
+            print(f"[Seed] Got {len(candles)} real candles for {symbol}")
+            for c in candles:
+                existing = db.query(PriceSnapshot).filter_by(
+                    symbol=symbol,
+                    timestamp=c["timestamp"]
+                ).first()
+                if not existing:
+                    db.add(PriceSnapshot(
+                        symbol=symbol,
+                        asset_class="equity",
+                        price=round(c["price"], 2),
+                        volume=None,
+                        timestamp=c["timestamp"],
+                        is_delayed=True
+                    ))
+            db.commit()
+            seeded.append(f"{symbol}({len(candles)} real candles)")
+        else:
+            print(f"[Seed] No Finnhub data for {symbol}, using synthetic")
+            price_row = db.query(PriceSnapshot).filter_by(symbol=symbol)\
+                          .order_by(PriceSnapshot.timestamp.desc()).first()
+            if not price_row:
+                continue
+            current_price = price_row.price
+            today = datetime.utcnow()
+            for i in range(60):
+                ret = random.gauss(0, 0.015)
+                synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
+                ts = today - timedelta(days=(60 - i))
+                db.add(PriceSnapshot(
+                    symbol=symbol, asset_class="equity",
+                    price=round(synthetic_price, 2),
+                    volume=None, timestamp=ts, is_delayed=True
+                ))
+            db.commit()
+            seeded.append(f"{symbol}(synthetic)")
 
-        for i in range(60):
-            ret = random.gauss(0, 0.015)
-            synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
-            ts = today - timedelta(days=(60 - i))
-            db.add(PriceSnapshot(
-                symbol=symbol,
-                asset_class="equity",
-                price=round(synthetic_price, 2),
-                volume=None,
-                timestamp=ts,
-                is_delayed=True
-            ))
-
-        db.commit()
-        seeded.append(symbol)
-        print(f"[Seed] Seeded 60 days for {symbol}")
+    # Recompute risk for all
+    for symbol in symbols:
+        try:
+            compute_and_store_risk(db, symbol)
+        except Exception as e:
+            print(f"[Seed] Risk failed for {symbol}: {e}")
 
     return {"status": "done", "seeded": seeded}
 
@@ -232,11 +305,15 @@ def list_earnings(db: Session = Depends(get_db)):
 
 
 @app.get("/prices/{symbol}")
-def get_prices(symbol: str, db: Session = Depends(get_db)):
+def get_prices(
+    symbol: str,
+    limit: int = Query(default=200),
+    db: Session = Depends(get_db)
+):
     rows = db.query(PriceSnapshot)\
              .filter_by(symbol=symbol.upper())\
              .order_by(PriceSnapshot.timestamp.desc())\
-             .limit(60).all()
+             .limit(limit).all()
     return [{"price": r.price, "timestamp": str(r.timestamp)} for r in rows]
 
 

@@ -108,3 +108,82 @@ def search_symbols(query: str) -> list:
         if r.get("type") == "Common Stock" and "." not in r.get("symbol", "")
     ]
     return filtered[:6]
+def get_historical_candles(symbol: str, days: int = 60) -> list:
+    """
+    Fetch historical daily candles from Finnhub.
+    Falls back to hourly if daily returns nothing.
+    Returns list of {timestamp, price} dicts.
+    """
+    to_ts   = int(datetime.today().timestamp())
+    from_ts = int((datetime.today() - timedelta(days=days)).timestamp())
+
+    # Try daily first
+    resp = httpx.get(
+        f"{BASE_URL}/stock/candle",
+        headers=HEADERS,
+        params={
+            "symbol": symbol,
+            "resolution": "D",
+            "from": from_ts,
+            "to": to_ts
+        },
+        timeout=TIMEOUT
+    )
+    data = resp.json()
+
+    if data.get("s") == "ok" and data.get("c"):
+        return [
+            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+            for t, c in zip(data["t"], data["c"])
+        ]
+
+    # Try weekly if daily fails
+    resp = httpx.get(
+        f"{BASE_URL}/stock/candle",
+        headers=HEADERS,
+        params={
+            "symbol": symbol,
+            "resolution": "W",
+            "from": from_ts,
+            "to": to_ts
+        },
+        timeout=TIMEOUT
+    )
+    data = resp.json()
+
+    if data.get("s") == "ok" and data.get("c"):
+        return [
+            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+            for t, c in zip(data["t"], data["c"])
+        ]
+
+    return []
+
+
+def get_intraday_candles(symbol: str) -> list:
+    """
+    Fetch today's intraday 1-hour candles.
+    Used when a new stock is added to show today's movement from market open.
+    """
+    to_ts   = int(datetime.today().timestamp())
+    from_ts = int((datetime.today() - timedelta(days=1)).timestamp())
+
+    resp = httpx.get(
+        f"{BASE_URL}/stock/candle",
+        headers=HEADERS,
+        params={
+            "symbol": symbol,
+            "resolution": "60",
+            "from": from_ts,
+            "to": to_ts
+        },
+        timeout=TIMEOUT
+    )
+    data = resp.json()
+
+    if data.get("s") == "ok" and data.get("c"):
+        return [
+            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+            for t, c in zip(data["t"], data["c"])
+        ]
+    return []

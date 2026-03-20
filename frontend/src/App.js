@@ -59,7 +59,7 @@ function PriceChart({ symbol, refreshTick }) {
   const activeTick = marketOpen ? refreshTick : 0;
 
   useEffect(() => {
-    axios.get(`${API}/prices/${symbol}`).then(res => {
+    axios.get(`${API}/prices/${symbol}?limit=200`).then(res => {
       const all = res.data.reverse();
       const now = new Date();
 

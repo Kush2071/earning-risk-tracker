@@ -498,3 +498,21 @@ def trigger_intraday(db: Session = Depends(get_db)):
             results.append(f"{symbol}({len(intraday)} candles)")
             print(f"[Intraday] {symbol}: {len(intraday)} candles")
     return {"status": "done", "results": results}
+# main.py
+from scheduler import start_scheduler
+
+_startup_complete = False
+
+@app.on_event("startup")
+async def startup_event():
+    global _startup_complete
+    
+    if _startup_complete:
+        return
+    
+    # Your other startup code...
+    
+    # Start scheduler only once
+    start_scheduler()
+    
+    _startup_complete = True

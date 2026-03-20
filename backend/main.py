@@ -45,22 +45,45 @@ def get_active_symbols_list(db):
 
 
 @app.on_event("startup")
+@app.on_event("startup")
 def startup_event():
     start_scheduler()
     db = next(get_db())
     try:
         count = db.query(PriceSnapshot).count()
         if count == 0:
-            print("[Startup] Empty DB detected — running initial ingest...")
+            print("[Startup] Empty DB — running initial ingest...")
             run_full_ingest(db, WATCHLIST)
-            for symbol in WATCHLIST:
-                compute_and_store_risk(db, symbol)
-            print("[Startup] Initial ingest complete")
+
+        # Always fetch intraday from market open on startup
+        print("[Startup] Fetching intraday data from market open...")
+        for symbol in WATCHLIST:
+            intraday = get_intraday_candles(symbol)
+            if intraday:
+                for c in intraday:
+                    existing = db.query(PriceSnapshot).filter_by(
+                        symbol=symbol,
+                        timestamp=c["timestamp"]
+                    ).first()
+                    if not existing:
+                        db.add(PriceSnapshot(
+                            symbol=symbol,
+                            asset_class="equity",
+                            price=round(c["price"], 2),
+                            volume=None,
+                            timestamp=c["timestamp"],
+                            is_delayed=True
+                        ))
+                db.commit()
+                print(f"[Startup] {symbol}: {len(intraday)} intraday candles loaded")
+
+        for symbol in WATCHLIST:
+            compute_and_store_risk(db, symbol)
+
     except Exception as e:
-        print(f"[Startup] Ingest failed: {e}")
+        print(f"[Startup] Failed: {e}")
     finally:
         db.close()
-
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -231,7 +254,7 @@ def seed_history(db: Session = Depends(get_db)):
         existing_count = db.query(PriceSnapshot)\
                            .filter_by(symbol=symbol).count()
 
-        if existing_count > 30:
+        if existing_count > 100:
             print(f"[Seed] {symbol} already has {existing_count} snapshots, skipping")
             continue
 
@@ -449,3 +472,29 @@ def scheduler_status():
         "running": scheduler.running,
         "jobs": [{"id": j.id, "next_run": str(j.next_run_time)} for j in jobs]
     }
+@app.post("/ingest/intraday")
+def trigger_intraday(db: Session = Depends(get_db)):
+    """Fetch today's intraday candles from market open for all symbols."""
+    symbols = get_active_symbols_list(db)
+    results = []
+    for symbol in symbols:
+        intraday = get_intraday_candles(symbol)
+        if intraday:
+            for c in intraday:
+                existing = db.query(PriceSnapshot).filter_by(
+                    symbol=symbol,
+                    timestamp=c["timestamp"]
+                ).first()
+                if not existing:
+                    db.add(PriceSnapshot(
+                        symbol=symbol,
+                        asset_class="equity",
+                        price=round(c["price"], 2),
+                        volume=None,
+                        timestamp=c["timestamp"],
+                        is_delayed=True
+                    ))
+            db.commit()
+            results.append(f"{symbol}({len(intraday)} candles)")
+            print(f"[Intraday] {symbol}: {len(intraday)} candles")
+    return {"status": "done", "results": results}

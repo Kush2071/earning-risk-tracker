@@ -26,6 +26,15 @@ from scheduler import start_scheduler, stop_scheduler
 
 Base.metadata.create_all(bind=engine)
 
+# Run migrations for new columns not handled by create_all
+from sqlalchemy import text
+with engine.connect() as conn:
+    try:
+        conn.execute(text("ALTER TABLE risk_metrics ADD COLUMN alpha FLOAT"))
+        conn.commit()
+    except Exception:
+        pass  # Column already exists, ignore
+
 app = FastAPI(title="Earnings Risk Tracker")
 
 app.add_middleware(

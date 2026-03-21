@@ -70,8 +70,19 @@ function PriceChart({ symbol, refreshTick }) {
 
       if (range === '1D') {
   const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
-  // Always just use the most recent date in the dataset — no timezone comparison
-  const resolved = dates[dates.length - 1];
+
+  // Find the most recent date that has more than 1 data point
+  // This skips today's single live-price snapshots and shows
+  // the last full trading session instead
+  let resolved = dates[dates.length - 1];
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const count = all.filter(d => d.timestamp.slice(0, 10) === dates[i]).length;
+    if (count > 1) {
+      resolved = dates[i];
+      break;
+    }
+  }
+
   setTargetDate(resolved);
   filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
   if (filtered.length === 0) filtered = all.slice(-30);

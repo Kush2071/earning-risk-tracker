@@ -222,11 +222,11 @@ def get_intraday_candles(symbol: str) -> list:
     if not (data.get("s") == "ok" and data.get("c")):
         return []
 
-    return [
-        {
-            # Store as ET datetime (naive) so date always matches ET trading day
-            "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
-            "price": c
-        }
-        for t, c in zip(data["t"], data["c"])
-    ]
+    candles = []
+for t, c in zip(data["t"], data["c"]):
+    ts_et = datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None)
+    # Only keep regular market hours: 9:30 AM to 4:00 PM ET
+    if ts_et.hour > 9 or (ts_et.hour == 9 and ts_et.minute >= 30):
+        if ts_et.hour < 16:
+            candles.append({"timestamp": ts_et, "price": c})
+return candles

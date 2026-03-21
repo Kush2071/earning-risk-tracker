@@ -6,7 +6,4 @@ python-dotenv==1.0.0
 apscheduler==3.10.4
 psycopg2-binary==2.9.9
 pytz==2024.1
-torch==2.2.2+cpu
-transformers==4.40.0
 vaderSentiment==3.3.2
---extra-index-url https://download.pytorch.org/whl/cpu

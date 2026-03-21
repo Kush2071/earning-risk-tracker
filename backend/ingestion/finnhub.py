@@ -24,82 +24,47 @@ TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # Use ET everywhere
 ET = ZoneInfo("America/New_York")
 
-# FinBERT model — loaded once at module level so it's cached across requests
-# Uses ProsusAI/finbert which is specifically trained on financial news
-_finbert_pipeline = None
+# VADER analyzer — loaded once at module level
+_vader = None
 
 
-def get_finbert():
-    """
-    Lazy-load FinBERT pipeline on first use.
-    Downloads ~500MB on first run, cached locally after that.
-    Falls back to VADER if transformers not available.
-    """
-    global _finbert_pipeline
-    if _finbert_pipeline is not None:
-        return _finbert_pipeline
+def get_vader():
+    """Lazy-load VADER analyzer on first use."""
+    global _vader
+    if _vader is not None:
+        return _vader
     try:
-        from transformers import pipeline
-        print("[FinBERT] Loading model ProsusAI/finbert...")
-        _finbert_pipeline = pipeline(
-            "text-classification",
-            model="ProsusAI/finbert",
-            tokenizer="ProsusAI/finbert",
-            top_k=None,          # return all 3 label scores
-            truncation=True,
-            max_length=512,
-        )
-        print("[FinBERT] Model loaded successfully")
-        return _finbert_pipeline
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _vader = SentimentIntensityAnalyzer()
+        print("[VADER] Sentiment analyzer loaded")
+        return _vader
     except Exception as e:
-        print(f"[FinBERT] Failed to load: {e} — falling back to VADER")
+        print(f"[VADER] Failed to load: {e}")
         return None
 
 
-def score_headline_finbert(headline: str) -> float:
+def score_headline(headline: str) -> float:
     """
-    Score a headline using FinBERT.
+    Score a headline using VADER sentiment analysis.
+    VADER understands negation ('not good' = negative),
+    intensifiers ('very strong' = more positive), punctuation,
+    and financial language better than keyword matching.
     Returns a float from -1.0 (very bearish) to +1.0 (very bullish).
-    FinBERT returns: positive, negative, neutral labels with probabilities.
-    Score = positive_prob - negative_prob
+    Falls back to keyword matching if VADER unavailable.
     """
-    pipe = get_finbert()
-    if pipe is None:
-        return score_headline_vader(headline)
-
-    try:
-        results = pipe(headline)
-        # results is a list of list of dicts: [[{label, score}, ...]]
-        scores_list = results[0] if isinstance(results[0], list) else results
-        label_map = {r["label"].lower(): r["score"] for r in scores_list}
-        positive = label_map.get("positive", 0.0)
-        negative = label_map.get("negative", 0.0)
-        # Score range: -1 (all negative) to +1 (all positive)
-        return round(positive - negative, 4)
-    except Exception as e:
-        print(f"[FinBERT] Inference error: {e}")
-        return score_headline_vader(headline)
+    analyzer = get_vader()
+    if analyzer:
+        try:
+            scores = analyzer.polarity_scores(headline)
+            return round(scores["compound"], 4)
+        except Exception:
+            pass
+    # Fallback to keyword matching
+    return _score_keywords(headline)
 
 
-def score_headline_vader(headline: str) -> float:
-    """
-    Fallback sentiment scorer using VADER.
-    Better than keyword matching — understands negation and intensifiers.
-    """
-    try:
-        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        analyzer = SentimentIntensityAnalyzer()
-        scores = analyzer.polarity_scores(headline)
-        return round(scores["compound"], 4)  # -1 to +1
-    except Exception:
-        return score_headline_keywords(headline)
-
-
-def score_headline_keywords(headline: str) -> float:
-    """
-    Last-resort fallback: original keyword matching.
-    Only used if both FinBERT and VADER fail.
-    """
+def _score_keywords(headline: str) -> float:
+    """Original keyword fallback — only used if VADER fails."""
     BULLISH = [
         "beat", "surpass", "record", "growth", "upgrade", "strong", "profit",
         "rise", "gain", "positive", "exceed", "outperform", "rally", "surge",
@@ -122,14 +87,6 @@ def score_headline_keywords(headline: str) -> float:
     if total == 0:
         return 0.0
     return round((bulls - bears) / total, 4)
-
-
-def score_headline(headline: str) -> float:
-    """
-    Main entry point for sentiment scoring.
-    Uses FinBERT → VADER → keywords as fallback chain.
-    """
-    return score_headline_finbert(headline)
 
 
 def now_et() -> datetime:
@@ -197,20 +154,16 @@ def get_company_news(symbol: str, from_date: str = None, to_date: str = None) ->
 
 def get_sentiment_from_news(symbol: str) -> dict:
     """
-    Fetch news headlines and score them using FinBERT.
+    Fetch news headlines and score them using VADER.
     Returns average sentiment score across all articles.
     """
     articles = get_company_news(symbol)
     if not articles:
         return {"symbol": symbol, "score": 0.0, "article_count": 0, "headlines_sample": []}
 
-    scores = []
-    for a in articles:
-        headline = a.get("headline", "")
-        if headline:
-            scores.append(score_headline(headline))
-
+    scores = [score_headline(a.get("headline", "")) for a in articles if a.get("headline")]
     avg_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+
     return {
         "symbol":           symbol,
         "score":            avg_score,

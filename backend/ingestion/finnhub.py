@@ -6,13 +6,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = "https://finnhub.io/api/v1"
-API_KEY  = "d6ti17pr01qhkb449fq0d6ti17pr01qhkb449fqg"
+# Finnhub — quotes, news, search, earnings
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+FINNHUB_KEY  = "d6ti17pr01qhkb449fq0d6ti17pr01qhkb449fqg"
+FINNHUB_HEADERS = {"X-Finnhub-Token": FINNHUB_KEY}
 
-HEADERS  = {"X-Finnhub-Token": API_KEY}
-TIMEOUT  = httpx.Timeout(30.0, connect=10.0)
+# Alpha Vantage — historical daily + intraday candles (free tier)
+AV_BASE = "https://www.alphavantage.co/query"
+AV_KEY  = "NTMC4940Y5O7O5AV"
 
-# Use ET everywhere — no more UTC confusion
+TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# Use ET everywhere
 ET = ZoneInfo("America/New_York")
 
 
@@ -24,6 +29,20 @@ def now_et() -> datetime:
 def today_et() -> datetime:
     """Today's date in ET at midnight."""
     n = now_et()
+    return n.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def last_trading_day_et() -> datetime:
+    """
+    Returns the most recent weekday in ET.
+    Saturday → Friday, Sunday → Friday, weekday → today.
+    """
+    n = now_et()
+    weekday = n.weekday()  # 0=Mon, 5=Sat, 6=Sun
+    if weekday == 5:       # Saturday
+        return (n - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif weekday == 6:     # Sunday
+        return (n - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
     return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -54,14 +73,16 @@ def score_headline(headline: str) -> float:
     return round((bulls - bears) / total, 4)
 
 
+# ─── FINNHUB FUNCTIONS (quotes, news, search, earnings) ──────────────────────
+
 def get_earnings_calendar(from_date: str = None, to_date: str = None) -> list:
     if not from_date:
         from_date = today_et().strftime("%Y-%m-%d")
     if not to_date:
         to_date = (today_et() + timedelta(days=14)).strftime("%Y-%m-%d")
     resp = httpx.get(
-        f"{BASE_URL}/calendar/earnings",
-        headers=HEADERS,
+        f"{FINNHUB_BASE}/calendar/earnings",
+        headers=FINNHUB_HEADERS,
         params={"from": from_date, "to": to_date},
         timeout=TIMEOUT
     )
@@ -71,8 +92,8 @@ def get_earnings_calendar(from_date: str = None, to_date: str = None) -> list:
 
 def get_quote(symbol: str) -> dict:
     resp = httpx.get(
-        f"{BASE_URL}/quote",
-        headers=HEADERS,
+        f"{FINNHUB_BASE}/quote",
+        headers=FINNHUB_HEADERS,
         params={"symbol": symbol},
         timeout=TIMEOUT
     )
@@ -86,8 +107,8 @@ def get_company_news(symbol: str, from_date: str = None, to_date: str = None) ->
     if not to_date:
         to_date = today_et().strftime("%Y-%m-%d")
     resp = httpx.get(
-        f"{BASE_URL}/company-news",
-        headers=HEADERS,
+        f"{FINNHUB_BASE}/company-news",
+        headers=FINNHUB_HEADERS,
         params={"symbol": symbol, "from": from_date, "to": to_date},
         timeout=TIMEOUT
     )
@@ -112,8 +133,8 @@ def get_sentiment_from_news(symbol: str) -> dict:
 def search_symbols(query: str) -> list:
     """Search for symbols by company name or ticker."""
     resp = httpx.get(
-        f"{BASE_URL}/search",
-        headers=HEADERS,
+        f"{FINNHUB_BASE}/search",
+        headers=FINNHUB_HEADERS,
         params={"q": query},
         timeout=TIMEOUT
     )
@@ -126,106 +147,97 @@ def search_symbols(query: str) -> list:
     return filtered[:6]
 
 
+# ─── ALPHA VANTAGE FUNCTIONS (historical daily + intraday) ───────────────────
+
 def get_historical_candles(symbol: str, days: int = 60) -> list:
     """
-    Fetch historical daily candles from Finnhub using ET dates.
-    Falls back to weekly if daily returns nothing.
-    Returns list of {timestamp, price} dicts with naive ET datetimes.
+    Fetch historical daily candles from Alpha Vantage.
+    Uses TIME_SERIES_DAILY — returns up to 100 trading days by default.
+    Timestamps are ET dates (market close time in ET).
     """
-    now     = now_et()
-    to_ts   = int(now.timestamp())
-    from_ts = int((now - timedelta(days=days)).timestamp())
-
-    # Try daily first
     resp = httpx.get(
-        f"{BASE_URL}/stock/candle",
-        headers=HEADERS,
+        AV_BASE,
         params={
+            "function":   "TIME_SERIES_DAILY",
             "symbol":     symbol,
-            "resolution": "D",
-            "from":       from_ts,
-            "to":         to_ts
+            "outputsize": "compact",   # last 100 trading days
+            "apikey":     AV_KEY,
         },
         timeout=TIMEOUT
     )
     data = resp.json()
 
-    if data.get("s") == "ok" and data.get("c"):
-        return [
-            {
-                "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
-                "price": c
-            }
-            for t, c in zip(data["t"], data["c"])
-        ]
+    time_series = data.get("Time Series (Daily)")
+    if not time_series:
+        print(f"[AV] No daily data for {symbol}: {data.get('Note') or data.get('Information') or 'unknown error'}")
+        return []
 
-    # Fall back to weekly
-    resp = httpx.get(
-        f"{BASE_URL}/stock/candle",
-        headers=HEADERS,
-        params={
-            "symbol":     symbol,
-            "resolution": "W",
-            "from":       from_ts,
-            "to":         to_ts
-        },
-        timeout=TIMEOUT
-    )
-    data = resp.json()
+    candles = []
+    cutoff  = today_et() - timedelta(days=days)
 
-    if data.get("s") == "ok" and data.get("c"):
-        return [
-            {
-                "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
-                "price": c
-            }
-            for t, c in zip(data["t"], data["c"])
-        ]
+    for date_str, values in sorted(time_series.items()):
+        try:
+            # Parse as ET date at market close (16:00 ET)
+            ts = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=16, minute=0, second=0)
+            if ts >= cutoff.replace(tzinfo=None):
+                candles.append({
+                    "timestamp": ts,
+                    "price":     round(float(values["4. close"]), 2)
+                })
+        except Exception:
+            continue
 
-    return []
+    print(f"[AV] {symbol}: {len(candles)} daily candles fetched")
+    return candles
 
 
 def get_intraday_candles(symbol: str) -> list:
     """
-    Fetch today's intraday 1-hour candles using ET time.
+    Fetch intraday 60-min candles from Alpha Vantage for the last trading day.
+    Always uses the most recent weekday in ET so weekends/after-hours
+    never produce wrong dates.
     Only returns candles within regular market hours: 9:30 AM - 4:00 PM ET.
-    This prevents pre-market/after-hours candles from polluting the 1D chart
-    with wrong dates or prices.
     """
-    now = now_et()
-
-    # Today's market open in ET = 9:30 AM ET
-    market_open_et = now.replace(hour=9, minute=30, second=0, microsecond=0)
-
-    # If it's before 9:30 AM ET today (pre-market), fetch from
-    # the previous trading day's open instead
-    if now < market_open_et:
-        market_open_et = market_open_et - timedelta(days=1)
-
-    from_ts = int(market_open_et.timestamp())
-    to_ts   = int(now.timestamp())
+    trading_day = last_trading_day_et()
+    trading_day_str = trading_day.strftime("%Y-%m-%d")
 
     resp = httpx.get(
-        f"{BASE_URL}/stock/candle",
-        headers=HEADERS,
+        AV_BASE,
         params={
-            "symbol":     symbol,
-            "resolution": "60",  # 1-hour candles
-            "from":       from_ts,
-            "to":         to_ts
+            "function":    "TIME_SERIES_INTRADAY",
+            "symbol":      symbol,
+            "interval":    "60min",
+            "outputsize":  "full",    # get full day not just last 100 points
+            "apikey":      AV_KEY,
         },
         timeout=TIMEOUT
     )
     data = resp.json()
 
-    if not (data.get("s") == "ok" and data.get("c")):
+    time_series = data.get("Time Series (60min)")
+    if not time_series:
+        print(f"[AV] No intraday data for {symbol}: {data.get('Note') or data.get('Information') or 'unknown error'}")
         return []
 
     candles = []
-    for t, c in zip(data["t"], data["c"]):
-        ts_et = datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None)
-        # Only keep regular market hours: 9:30 AM to 4:00 PM ET
-        if ts_et.hour > 9 or (ts_et.hour == 9 and ts_et.minute >= 30):
-            if ts_et.hour < 16:
-                candles.append({"timestamp": ts_et, "price": c})
+    for dt_str, values in sorted(time_series.items()):
+        try:
+            # Alpha Vantage returns ET timestamps natively
+            ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+
+            # Only keep the last trading day
+            if ts.strftime("%Y-%m-%d") != trading_day_str:
+                continue
+
+            # Only regular market hours: 9:30 AM to 4:00 PM ET
+            if ts.hour > 9 or (ts.hour == 9 and ts.minute >= 30):
+                if ts.hour < 16:
+                    candles.append({
+                        "timestamp": ts,
+                        "price":     round(float(values["4. close"]), 2)
+                    })
+        except Exception:
+            continue
+
+    print(f"[AV] {symbol}: {len(candles)} intraday candles for {trading_day_str}")
     return candles

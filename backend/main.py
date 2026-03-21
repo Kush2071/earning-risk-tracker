@@ -36,6 +36,8 @@ app.add_middleware(
 
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
 
+_startup_complete = False
+
 
 def get_active_symbols_list(db):
     """Get all unique symbols that have price data."""
@@ -45,9 +47,14 @@ def get_active_symbols_list(db):
 
 
 @app.on_event("startup")
-@app.on_event("startup")
-def startup_event():
+async def startup_event():
+    global _startup_complete
+
+    if _startup_complete:
+        return
+
     start_scheduler()
+
     db = next(get_db())
     try:
         count = db.query(PriceSnapshot).count()
@@ -84,6 +91,9 @@ def startup_event():
         print(f"[Startup] Failed: {e}")
     finally:
         db.close()
+
+    _startup_complete = True
+
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -199,24 +209,9 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                     is_delayed=True
                 ))
         db.commit()
-
-        # Also fetch today's intraday data
-        intraday = get_intraday_candles(s)
-        if intraday:
-            for c in intraday:
-                db.add(PriceSnapshot(
-                    symbol=s,
-                    asset_class="equity",
-                    price=round(c["price"], 2),
-                    volume=None,
-                    timestamp=c["timestamp"],
-                    is_delayed=True
-                ))
-            db.commit()
-            print(f"[Seed] Added {len(intraday)} intraday candles for {s}")
     else:
         # Fallback to synthetic if Finnhub returns nothing
-        print(f"[Seed] No Finnhub data for {s}, using synthetic history")
+        print(f"[Seed] No Finnhub daily data for {s}, using synthetic history")
         price_row = db.query(PriceSnapshot).filter_by(symbol=s)\
                       .order_by(PriceSnapshot.timestamp.desc()).first()
         if price_row:
@@ -233,6 +228,33 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                 ))
             db.commit()
 
+    # FIX 3: Always fetch today's intraday candles unconditionally,
+    # regardless of whether daily candles were available.
+    # Previously this was inside `if candles:` so new symbols with
+    # rate-limited or missing daily data never got intraday data,
+    # causing the 1D chart to show only a single dot at current time.
+    print(f"[Seed] Fetching intraday candles for {s}...")
+    intraday = get_intraday_candles(s)
+    if intraday:
+        for c in intraday:
+            existing = db.query(PriceSnapshot).filter_by(
+                symbol=s,
+                timestamp=c["timestamp"]
+            ).first()
+            if not existing:
+                db.add(PriceSnapshot(
+                    symbol=s,
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+        db.commit()
+        print(f"[Seed] Added {len(intraday)} intraday candles for {s}")
+    else:
+        print(f"[Seed] No intraday data available for {s} (market may be closed)")
+
     # Step 3: compute risk
     compute_and_store_risk(db, s)
 
@@ -240,6 +262,7 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
     ingest_sentiment(db, s)
 
     return {"status": "done", "symbol": s}
+
 
 @app.post("/ingest/seed-history")
 def seed_history(
@@ -279,23 +302,6 @@ def seed_history(
                     is_delayed=True
                 ))
             db.commit()
-
-            # Also get today's intraday data
-            intraday = get_intraday_candles(symbol)
-            if intraday:
-                for c in intraday:
-                    db.add(PriceSnapshot(
-                        symbol=symbol,
-                        asset_class="equity",
-                        price=round(c["price"], 2),
-                        volume=None,
-                        timestamp=c["timestamp"],
-                        is_delayed=True
-                    ))
-                db.commit()
-                print(f"[Seed] Added {len(intraday)} intraday candles for {symbol}")
-
-            seeded.append(f"{symbol}({len(candles)} real + {len(intraday) if intraday else 0} intraday)")
         else:
             print(f"[Seed] No Finnhub data for {symbol}, using synthetic")
             current_price = 100.0
@@ -311,6 +317,25 @@ def seed_history(
                 ))
             db.commit()
             seeded.append(f"{symbol}(synthetic)")
+            continue
+
+        # Always fetch intraday regardless of whether daily candles succeeded
+        intraday = get_intraday_candles(symbol)
+        if intraday:
+            for c in intraday:
+                db.add(PriceSnapshot(
+                    symbol=symbol,
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+            db.commit()
+            print(f"[Seed] Added {len(intraday)} intraday candles for {symbol}")
+            seeded.append(f"{symbol}({len(candles)} real + {len(intraday)} intraday)")
+        else:
+            seeded.append(f"{symbol}({len(candles)} real)")
 
     # Recompute risk for all
     for symbol in symbols:
@@ -320,6 +345,7 @@ def seed_history(
             print(f"[Seed] Risk failed for {symbol}: {e}")
 
     return {"status": "done", "seeded": seeded}
+
 
 @app.post("/ingest/force-reseed/{symbol}")
 def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
@@ -355,7 +381,7 @@ def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
     else:
         print(f"[ForceReseed] No Finnhub daily data for {s}")
 
-    # Fetch today's intraday candles
+    # Fetch today's intraday candles (always, unconditionally)
     intraday = get_intraday_candles(s)
     intraday_count = 0
 
@@ -382,13 +408,14 @@ def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
     total = db.query(PriceSnapshot).filter_by(symbol=s).count()
 
     return {
-        "symbol":          s,
-        "deleted":         count,
-        "daily_candles":   daily_count,
+        "symbol":           s,
+        "deleted":          count,
+        "daily_candles":    daily_count,
         "intraday_candles": intraday_count,
-        "total_snapshots": total,
-        "finnhub_data":    daily_count > 0
+        "total_snapshots":  total,
+        "finnhub_data":     daily_count > 0
     }
+
 
 @app.get("/earnings")
 def list_earnings(db: Session = Depends(get_db)):
@@ -553,6 +580,8 @@ def scheduler_status():
         "running": scheduler.running,
         "jobs": [{"id": j.id, "next_run": str(j.next_run_time)} for j in jobs]
     }
+
+
 @app.post("/ingest/intraday")
 def trigger_intraday(db: Session = Depends(get_db)):
     """Fetch today's intraday candles from market open for all symbols."""
@@ -579,21 +608,3 @@ def trigger_intraday(db: Session = Depends(get_db)):
             results.append(f"{symbol}({len(intraday)} candles)")
             print(f"[Intraday] {symbol}: {len(intraday)} candles")
     return {"status": "done", "results": results}
-# main.py
-from scheduler import start_scheduler
-
-_startup_complete = False
-
-@app.on_event("startup")
-async def startup_event():
-    global _startup_complete
-    
-    if _startup_complete:
-        return
-    
-    # Your other startup code...
-    
-    # Start scheduler only once
-    start_scheduler()
-    
-    _startup_complete = True

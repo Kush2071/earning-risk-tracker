@@ -7,6 +7,9 @@ const API = 'https://earning-risk-tracker-production.up.railway.app';
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'];
 const REFRESH_INTERVAL  = 40000;
 
+// FIX 1: Dynamic limits per range — 200 was only ~3hrs of intraday data
+const RANGE_LIMITS = { '1D': 500, '5D': 2500, '1M': 10000 };
+
 const COLORS = {
   positive: '#1D9E75',
   negative: '#D85A30',
@@ -50,50 +53,37 @@ function isMarketOpen() {
 }
 
 function PriceChart({ symbol, refreshTick }) {
-  const [data, setData]       = useState([]);
-  const [range, setRange]     = useState('1D');
-  const marketOpen            = isMarketOpen();
-
-  const RANGES = ['1D', '5D', '1M'];
-
-  const activeTick = marketOpen ? refreshTick : 0;
+  const [data, setData]   = useState([]);
+  const [range, setRange] = useState('1D');
+  const marketOpen        = isMarketOpen();
+  const RANGES            = ['1D', '5D', '1M'];
+  const activeTick        = marketOpen ? refreshTick : 0;
 
   useEffect(() => {
-    axios.get(`${API}/prices/${symbol}?limit=200`).then(res => {
+    // FIX 1: Use range-appropriate limit so 5D and 1M have enough records
+    const limit = RANGE_LIMITS[range];
+    axios.get(`${API}/prices/${symbol}?limit=${limit}`).then(res => {
       const all = res.data.reverse();
       const now = new Date();
-
       let filtered;
+
       if (range === '1D') {
-        const nowUTC = new Date();
-
-        // Try today first (UTC date)
-        const todayUTC = nowUTC.toISOString().slice(0, 10);
-        let todayData  = all.filter(d => d.timestamp.slice(0, 10) === todayUTC);
-
-        // Also try yesterday UTC (handles timezone edge cases at start of day)
-        if (todayData.length === 0) {
-          const yesterdayUTC = new Date(nowUTC - 24 * 60 * 60 * 1000)
-            .toISOString().slice(0, 10);
-          todayData = all.filter(d => d.timestamp.slice(0, 10) === yesterdayUTC);
-        }
-
-        if (todayData.length > 0) {
-          // Show full trading session — all snapshots from that day
-          filtered = todayData;
-        } else {
-          // No data for today — show most recent trading day
-          const dates   = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
-          const lastDay = dates[dates.length - 1];
-          filtered      = lastDay
-            ? all.filter(d => d.timestamp.slice(0, 10) === lastDay)
-            : all.slice(-20);
-        }
+        // FIX 2: Always fall back to the most recent date in the dataset.
+        // This handles: weekends, holidays, new symbols with only daily candles,
+        // and timezone edge cases — without relying on fragile UTC date matching.
+        const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
+        const nowUTC = new Date().toISOString().slice(0, 10);
+        // Prefer today if data exists, otherwise use the most recent trading day
+        const targetDate = dates.includes(nowUTC) ? nowUTC : dates[dates.length - 1];
+        filtered = targetDate
+          ? all.filter(d => d.timestamp.slice(0, 10) === targetDate)
+          : all.slice(-30);
       } else if (range === '5D') {
         const cutoff = new Date(now - 5 * 24 * 60 * 60 * 1000);
         filtered = all.filter(d => new Date(d.timestamp) >= cutoff);
-        if (filtered.length === 0) filtered = all.slice(-30);
+        if (filtered.length === 0) filtered = all.slice(-150);
       } else {
+        // 1M — use everything returned (up to 10,000 records)
         filtered = all;
       }
 
@@ -109,7 +99,7 @@ function PriceChart({ symbol, refreshTick }) {
         };
       }));
     });
-  }, [symbol, range, activeTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [symbol, range, activeTick]);
 
   if (data.length === 0) return (
     <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ccc', fontSize: 12 }}>
@@ -493,9 +483,9 @@ function ExpectedMovePanel({ watchlist }) {
     ).then(setData);
   }, [watchlist]);
 
-  useEffect(() => { 
-    fetchData(days); 
-}, [watchlist, days, fetchData]); // Add all dependencies
+  useEffect(() => {
+    fetchData(days);
+  }, [watchlist, days, fetchData]);
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
@@ -545,9 +535,9 @@ function PositionSizer({ watchlist }) {
     ).then(r => setResults(r.filter(x => x.shares)));
   }, [watchlist, portfolio, riskPct]);
 
-  useEffect(() => { 
-    calculate(); 
-}, [watchlist, calculate]); // Add calculate to dependencies
+  useEffect(() => {
+    calculate();
+  }, [watchlist, calculate]);
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
@@ -689,8 +679,12 @@ function EarningsTable() {
 
 export default function App() {
   const [watchlist, setWatchlist] = useState(() => {
-    const saved = localStorage.getItem('watchlist');
-    return saved ? JSON.parse(saved) : DEFAULT_WATCHLIST;
+    try {
+      const saved = localStorage.getItem('watchlist');
+      return saved ? JSON.parse(saved) : DEFAULT_WATCHLIST;
+    } catch {
+      return DEFAULT_WATCHLIST;
+    }
   });
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastUpdated, setLastUpdated] = useState(new Date().toLocaleTimeString());

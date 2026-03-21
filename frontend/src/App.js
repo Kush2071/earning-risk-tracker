@@ -7,7 +7,7 @@ const API = 'https://earning-risk-tracker-production.up.railway.app';
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'];
 const REFRESH_INTERVAL  = 40000;
 
-// FIX 1: Dynamic limits per range — 200 was only ~3hrs of intraday data
+// Range-aware fetch limits so 5D and 1M have enough records
 const RANGE_LIMITS = { '1D': 500, '5D': 2500, '1M': 10000 };
 
 const COLORS = {
@@ -53,14 +53,15 @@ function isMarketOpen() {
 }
 
 function PriceChart({ symbol, refreshTick }) {
-  const [data, setData]   = useState([]);
-  const [range, setRange] = useState('1D');
-  const marketOpen        = isMarketOpen();
-  const RANGES            = ['1D', '5D', '1M'];
-  const activeTick        = marketOpen ? refreshTick : 0;
+  const [data, setData]           = useState([]);
+  const [range, setRange]         = useState('1D');
+  // FIX 1: track the resolved date so tooltip can show it instead of "Last session"
+  const [targetDate, setTargetDate] = useState('');
+  const marketOpen                = isMarketOpen();
+  const RANGES                    = ['1D', '5D', '1M'];
+  const activeTick                = marketOpen ? refreshTick : 0;
 
   useEffect(() => {
-    // FIX 1: Use range-appropriate limit so 5D and 1M have enough records
     const limit = RANGE_LIMITS[range];
     axios.get(`${API}/prices/${symbol}?limit=${limit}`).then(res => {
       const all = res.data.reverse();
@@ -68,23 +69,32 @@ function PriceChart({ symbol, refreshTick }) {
       let filtered;
 
       if (range === '1D') {
-        // FIX 2: Always fall back to the most recent date in the dataset.
-        // This handles: weekends, holidays, new symbols with only daily candles,
-        // and timezone edge cases — without relying on fragile UTC date matching.
-        const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
+        // FIX 1: always resolve to the most recent trading day in the dataset
+        const dates  = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
         const nowUTC = new Date().toISOString().slice(0, 10);
-        // Prefer today if data exists, otherwise use the most recent trading day
-        const targetDate = dates.includes(nowUTC) ? nowUTC : dates[dates.length - 1];
-        filtered = targetDate
-          ? all.filter(d => d.timestamp.slice(0, 10) === targetDate)
-          : all.slice(-30);
+        const resolved = dates.includes(nowUTC) ? nowUTC : (dates[dates.length - 1] || nowUTC);
+        // Store resolved date so tooltip can display it
+        setTargetDate(resolved);
+        filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
+        if (filtered.length === 0) filtered = all.slice(-30);
+
       } else if (range === '5D') {
+        // FIX 2: deduplicate to one point per day (last price) to avoid gaps
+        // between midnight daily candles and intraday candles
         const cutoff = new Date(now - 5 * 24 * 60 * 60 * 1000);
-        filtered = all.filter(d => new Date(d.timestamp) >= cutoff);
-        if (filtered.length === 0) filtered = all.slice(-150);
+        const inRange = all.filter(d => new Date(d.timestamp) >= cutoff);
+        const byDate = {};
+        inRange.forEach(d => { byDate[d.timestamp.slice(0, 10)] = d; });
+        filtered = Object.values(byDate).sort((a, b) =>
+          a.timestamp.localeCompare(b.timestamp));
+        if (filtered.length === 0) filtered = all.slice(-7);
+
       } else {
-        // 1M — use everything returned (up to 10,000 records)
-        filtered = all;
+        // FIX 2: 1M — one point per day to avoid cramping and flat-line effect
+        const byDate = {};
+        all.forEach(d => { byDate[d.timestamp.slice(0, 10)] = d; });
+        filtered = Object.values(byDate).sort((a, b) =>
+          a.timestamp.localeCompare(b.timestamp));
       }
 
       setData(filtered.map(d => {
@@ -94,7 +104,8 @@ function PriceChart({ symbol, refreshTick }) {
         const mm  = String(utc.getMonth() + 1).padStart(2, '0');
         const dd  = String(utc.getDate()).padStart(2, '0');
         return {
-          name:  range === '1D' ? `${hh}:${min}` : `${mm}-${dd}`,
+          // FIX 2: use mm/dd for 5D and 1M so dates are cleaner and spread out
+          name:  range === '1D' ? `${hh}:${min}` : `${mm}/${dd}`,
           price: d.price,
         };
       }));
@@ -141,6 +152,7 @@ function PriceChart({ symbol, refreshTick }) {
               tickLine={false}
               axisLine={false}
               interval="preserveStartEnd"
+              minTickGap={30}
             />
             <YAxis
               domain={[minP, maxP]}
@@ -160,7 +172,12 @@ function PriceChart({ symbol, refreshTick }) {
             />
             <Tooltip
               formatter={v => [`$${Number(v).toFixed(2)}`, 'Price']}
-              labelFormatter={l => range === '1D' ? `${marketOpen ? 'Today' : 'Last session'} ${l}` : `Date: ${l}`}
+              // FIX 1: show actual date instead of generic "Last session"
+              labelFormatter={l =>
+                range === '1D'
+                  ? `${targetDate} ${l}`
+                  : `Date: ${l}`
+              }
               contentStyle={{ fontSize: 11, borderRadius: 6 }}
             />
           </LineChart>
@@ -179,7 +196,6 @@ function StockCard({ symbol, onRemove, refreshTick }) {
   const [livePrice, setLivePrice] = useState(null);
 
   useEffect(() => {
-    // Only fetch live price during market hours
     if (isMarketOpen()) {
       axios.get(`${API}/live-price/${symbol}`).then(res => {
         if (res.data && res.data.price) {
@@ -720,7 +736,6 @@ export default function App() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f7f7f5', fontFamily: 'system-ui, sans-serif', padding: 24 }}>
-
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 500 }}>Earnings Risk Tracker</h1>
@@ -749,7 +764,6 @@ export default function App() {
         <SentimentPanel watchlist={watchlist} />
         <EarningsTable />
       </div>
-
     </div>
   );
 }

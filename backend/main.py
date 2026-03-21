@@ -210,7 +210,7 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                 ))
         db.commit()
     else:
-        # Fallback to synthetic if Finnhub returns nothing
+        # Fallback to synthetic daily history if Finnhub returns nothing
         print(f"[Seed] No Finnhub daily data for {s}, using synthetic history")
         price_row = db.query(PriceSnapshot).filter_by(symbol=s)\
                       .order_by(PriceSnapshot.timestamp.desc()).first()
@@ -228,13 +228,12 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                 ))
             db.commit()
 
-    # FIX 3: Always fetch today's intraday candles unconditionally,
-    # regardless of whether daily candles were available.
-    # Previously this was inside `if candles:` so new symbols with
-    # rate-limited or missing daily data never got intraday data,
-    # causing the 1D chart to show only a single dot at current time.
+    # Step 3: Always fetch today's intraday candles unconditionally.
+    # Previously inside `if candles:` so new symbols with no daily data
+    # never got intraday either, causing the 1D chart to show one dot.
     print(f"[Seed] Fetching intraday candles for {s}...")
     intraday = get_intraday_candles(s)
+
     if intraday:
         for c in intraday:
             existing = db.query(PriceSnapshot).filter_by(
@@ -253,12 +252,34 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
         db.commit()
         print(f"[Seed] Added {len(intraday)} intraday candles for {s}")
     else:
-        print(f"[Seed] No intraday data available for {s} (market may be closed)")
+        # FIX 3: Market is closed — Finnhub returns no intraday data for new symbols
+        # added outside market hours. Generate synthetic intraday candles anchored to
+        # the last known price so the 1D chart shows a full session instead of one dot.
+        print(f"[Seed] No intraday data for {s} (market closed) — generating synthetic intraday")
+        last = db.query(PriceSnapshot).filter_by(symbol=s)\
+                 .order_by(PriceSnapshot.timestamp.desc()).first()
+        if last:
+            # Simulate from 09:30 UTC today with 5-min candles (78 = full session)
+            today = datetime.utcnow().replace(hour=9, minute=30, second=0, microsecond=0)
+            base_price = last.price
+            for i in range(78):
+                noise = random.gauss(0, 0.001)
+                synthetic_price = base_price * (1 + noise * (i / 78))
+                ts = today + timedelta(minutes=5 * i)
+                existing = db.query(PriceSnapshot).filter_by(symbol=s, timestamp=ts).first()
+                if not existing:
+                    db.add(PriceSnapshot(
+                        symbol=s, asset_class="equity",
+                        price=round(synthetic_price, 2),
+                        volume=None, timestamp=ts, is_delayed=True
+                    ))
+            db.commit()
+            print(f"[Seed] Generated 78 synthetic intraday candles for {s}")
 
-    # Step 3: compute risk
+    # Step 4: compute risk
     compute_and_store_risk(db, s)
 
-    # Step 4: sentiment
+    # Step 5: sentiment
     ingest_sentiment(db, s)
 
     return {"status": "done", "symbol": s}

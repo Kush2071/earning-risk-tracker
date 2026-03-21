@@ -107,17 +107,18 @@ function PriceChart({ symbol, refreshTick }) {
       }
 
       setData(filtered.map(d => {
-        const utc = new Date(d.timestamp + 'Z');
-        const hh  = String(utc.getHours()).padStart(2, '0');
-        const min = String(utc.getMinutes()).padStart(2, '0');
-        const mm  = String(utc.getMonth() + 1).padStart(2, '0');
-        const dd  = String(utc.getDate()).padStart(2, '0');
-        return {
-          // FIX 2: use mm/dd for 5D and 1M so dates are cleaner and spread out
-          name:  range === '1D' ? `${hh}:${min}` : `${mm}/${dd}`,
-          price: d.price,
-        };
-      }));
+  // Timestamps are stored in ET — parse directly from string
+  // without adding 'Z' to avoid UTC timezone shift
+  const parts = d.timestamp.split(' ');
+  const datePart = parts[0]; // "2026-03-20"
+  const timePart = parts[1] || '00:00:00'; // "10:30:00"
+  const [hh, min] = timePart.split(':');
+  const [, mm, dd] = datePart.split('-');
+  return {
+    name:  range === '1D' ? `${hh}:${min}` : `${mm}/${dd}`,
+    price: d.price,
+  };
+}));
     });
   }, [symbol, range, activeTick]);
 

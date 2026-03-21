@@ -153,7 +153,6 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
     if data.get("s") == "ok" and data.get("c"):
         return [
             {
-                # Convert unix timestamp → ET datetime (naive, for DB storage)
                 "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
                 "price": c
             }
@@ -189,9 +188,9 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 def get_intraday_candles(symbol: str) -> list:
     """
     Fetch today's intraday 1-hour candles using ET time.
-    Fetches from today's market open (9:30 AM ET) to now.
-    Always uses ET so the date is always correct regardless of
-    what UTC thinks the date is.
+    Only returns candles within regular market hours: 9:30 AM - 4:00 PM ET.
+    This prevents pre-market/after-hours candles from polluting the 1D chart
+    with wrong dates or prices.
     """
     now = now_et()
 
@@ -223,10 +222,10 @@ def get_intraday_candles(symbol: str) -> list:
         return []
 
     candles = []
-for t, c in zip(data["t"], data["c"]):
-    ts_et = datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None)
-    # Only keep regular market hours: 9:30 AM to 4:00 PM ET
-    if ts_et.hour > 9 or (ts_et.hour == 9 and ts_et.minute >= 30):
-        if ts_et.hour < 16:
-            candles.append({"timestamp": ts_et, "price": c})
-return candles
+    for t, c in zip(data["t"], data["c"]):
+        ts_et = datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None)
+        # Only keep regular market hours: 9:30 AM to 4:00 PM ET
+        if ts_et.hour > 9 or (ts_et.hour == 9 and ts_et.minute >= 30):
+            if ts_et.hour < 16:
+                candles.append({"timestamp": ts_et, "price": c})
+    return candles

@@ -108,10 +108,12 @@ def search_symbols(query: str) -> list:
         if r.get("type") == "Common Stock" and "." not in r.get("symbol", "")
     ]
     return filtered[:6]
+
+
 def get_historical_candles(symbol: str, days: int = 60) -> list:
     """
     Fetch historical daily candles from Finnhub.
-    Falls back to hourly if daily returns nothing.
+    Falls back to weekly if daily returns nothing.
     Returns list of {timestamp, price} dicts.
     """
     to_ts   = int(datetime.today().timestamp())
@@ -122,10 +124,10 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
         f"{BASE_URL}/stock/candle",
         headers=HEADERS,
         params={
-            "symbol": symbol,
+            "symbol":     symbol,
             "resolution": "D",
-            "from": from_ts,
-            "to": to_ts
+            "from":       from_ts,
+            "to":         to_ts
         },
         timeout=TIMEOUT
     )
@@ -137,15 +139,15 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
             for t, c in zip(data["t"], data["c"])
         ]
 
-    # Try weekly if daily fails
+    # Fall back to weekly if daily fails
     resp = httpx.get(
         f"{BASE_URL}/stock/candle",
         headers=HEADERS,
         params={
-            "symbol": symbol,
+            "symbol":     symbol,
             "resolution": "W",
-            "from": from_ts,
-            "to": to_ts
+            "from":       from_ts,
+            "to":         to_ts
         },
         timeout=TIMEOUT
     )
@@ -162,28 +164,67 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 
 def get_intraday_candles(symbol: str) -> list:
     """
-    Fetch today's intraday 1-hour candles.
-    Used when a new stock is added to show today's movement from market open.
+    Fetch today's intraday 1-hour candles from market open (9:30 AM ET)
+    to now. Works for both hardcoded and search bar stocks.
+
+    Uses a 2-day window to handle UTC rollover — e.g. after 7 PM ET
+    (midnight UTC) today's ET session is still within the last 24hrs UTC
+    but the date has already flipped, so we always fetch from 2 days ago
+    and filter to only keep candles from today's ET session.
+
+    Market open  = 14:30 UTC (9:30 AM ET)
+    Market close = 21:00 UTC (4:00 PM ET)
     """
-    to_ts   = int(datetime.today().timestamp())
-    from_ts = int((datetime.today() - timedelta(days=1)).timestamp())
+    now_utc = datetime.utcnow()
+
+    # Always fetch a 2-day window to avoid missing today's session
+    # due to UTC/ET timezone differences
+    to_ts   = int(now_utc.timestamp())
+    from_ts = int((now_utc - timedelta(days=2)).timestamp())
 
     resp = httpx.get(
         f"{BASE_URL}/stock/candle",
         headers=HEADERS,
         params={
-            "symbol": symbol,
-            "resolution": "60",
-            "from": from_ts,
-            "to": to_ts
+            "symbol":     symbol,
+            "resolution": "60",   # 1-hour candles
+            "from":       from_ts,
+            "to":         to_ts
         },
         timeout=TIMEOUT
     )
     data = resp.json()
 
-    if data.get("s") == "ok" and data.get("c"):
-        return [
-            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
-            for t, c in zip(data["t"], data["c"])
-        ]
-    return []
+    if not (data.get("s") == "ok" and data.get("c")):
+        return []
+
+    candles = [
+        {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+        for t, c in zip(data["t"], data["c"])
+    ]
+
+    # Filter to only today's ET session:
+    # Market open = 14:30 UTC, market close = 21:00 UTC
+    # Use ET date: if UTC hour < 5, we're still on "yesterday ET"
+    # so the trading day started at 14:30 UTC of the previous UTC day.
+    if now_utc.hour < 5:
+        # After midnight UTC but before 5 AM UTC = still previous ET day's session
+        session_start = now_utc.replace(
+            hour=14, minute=30, second=0, microsecond=0
+        ) - timedelta(days=1)
+    else:
+        session_start = now_utc.replace(
+            hour=14, minute=30, second=0, microsecond=0
+        )
+
+    session_end = session_start + timedelta(hours=6, minutes=30)  # 4:00 PM ET
+
+    # Keep candles within today's session window
+    today_candles = [
+        c for c in candles
+        if session_start <= c["timestamp"] <= session_end
+    ]
+
+    # If we got session candles, return those; otherwise return all fetched candles
+    # (handles pre-market or extended hours edge cases)
+    return today_candles if today_candles else candles

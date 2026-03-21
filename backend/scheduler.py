@@ -33,7 +33,6 @@ def get_active_symbols():
 
 
 def scheduled_ingest():
-    def scheduled_ingest():
     """Job that runs every 15 minutes during market hours."""
     symbols = get_active_symbols()
     db = SessionLocal()
@@ -43,7 +42,6 @@ def scheduled_ingest():
         logger.error(f"[Scheduler] Ingest failed: {e}")
     finally:
         db.close()
-
 
 def store_closing_prices():
     """

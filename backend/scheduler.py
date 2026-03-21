@@ -91,16 +91,16 @@ def store_closing_prices():
 
 def setup_scheduler_jobs():
     """Setup scheduler jobs (called only once)"""
-    # Check if jobs are already added to avoid duplicates
     existing_job_ids = [job.id for job in scheduler.get_jobs()]
-    
+
     # Every 15 minutes during market hours Mon-Fri
+    # hour="9-16" extended from 9-15 to catch late candles before closing job
     if "market_hours_ingest" not in existing_job_ids:
         scheduler.add_job(
             scheduled_ingest,
             trigger=CronTrigger(
                 day_of_week="mon-fri",
-                hour="9-15",
+                hour="9-16",
                 minute="*/15",
                 timezone="America/Chicago"
             ),
@@ -109,7 +109,7 @@ def setup_scheduler_jobs():
             replace_existing=True
         )
         logger.info("[Scheduler] Added market hours ingest job")
-    
+
     # At 4:05 PM CT every weekday — store closing prices
     if "closing_price_store" not in existing_job_ids:
         scheduler.add_job(
@@ -126,34 +126,45 @@ def setup_scheduler_jobs():
         )
         logger.info("[Scheduler] Added closing price store job")
 
+    # At 8:30 AM CT every weekday — pre-market morning ingest
+    # Ensures data is fresh on startup before market opens
+    if "morning_ingest" not in existing_job_ids:
+        scheduler.add_job(
+            scheduled_ingest,
+            trigger=CronTrigger(
+                day_of_week="mon-fri",
+                hour=8,
+                minute=30,
+                timezone="America/Chicago"
+            ),
+            id="morning_ingest",
+            name="Pre-market morning ingest at 8:30 AM CT",
+            replace_existing=True
+        )
+        logger.info("[Scheduler] Added morning ingest job")
+
 
 def start_scheduler():
     """Start the scheduler if it's not already running"""
     global _scheduler_started
-    
-    # Check if scheduler is already running
-    if _scheduler_started:
+
+    if _startup_complete := _scheduler_started:
         logger.info("[Scheduler] Scheduler already started, skipping")
         return
-    
+
     try:
-        # Check if scheduler is already running
         if scheduler.running:
             logger.info("[Scheduler] Scheduler is already running")
             _scheduler_started = True
             return
-        
-        # Setup jobs (this will only add jobs if they don't exist)
+
         setup_scheduler_jobs()
-        
-        # Start the scheduler
         scheduler.start()
         _scheduler_started = True
-        logger.info("[Scheduler] Started — market hours ingest + closing price job active")
-        
-        # Register cleanup on application exit
+        logger.info("[Scheduler] Started — market hours ingest + closing price job + morning ingest active")
+
         atexit.register(stop_scheduler)
-        
+
     except SchedulerAlreadyRunningError:
         logger.warning("[Scheduler] Scheduler already running (caught error)")
         _scheduler_started = True
@@ -165,7 +176,7 @@ def start_scheduler():
 def stop_scheduler():
     """Stop the scheduler gracefully"""
     global _scheduler_started
-    
+
     try:
         if scheduler and scheduler.running:
             scheduler.shutdown(wait=False)
@@ -175,13 +186,11 @@ def stop_scheduler():
         logger.error(f"[Scheduler] Error during shutdown: {e}")
 
 
-# Optional: Add a health check function
 def is_scheduler_running():
     """Check if scheduler is running"""
     return scheduler.running if scheduler else False
 
 
-# Optional: Add a function to restart scheduler if needed
 def restart_scheduler():
     """Restart the scheduler (useful for debugging)"""
     stop_scheduler()

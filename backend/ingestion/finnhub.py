@@ -194,15 +194,12 @@ def get_intraday_candles(symbol: str) -> list:
     """
     now = now_et()
 
-    # Always use the most recent weekday (skip weekends)
-    # Saturday=5, Sunday=6
+    # Today's market open in ET = 9:30 AM ET
     market_open_et = now.replace(hour=9, minute=30, second=0, microsecond=0)
 
-    if now.weekday() == 5:        # Saturday → go back to Friday
-        market_open_et = market_open_et - timedelta(days=1)
-    elif now.weekday() == 6:      # Sunday → go back to Friday
-        market_open_et = market_open_et - timedelta(days=2)
-    elif now < market_open_et:    # Pre-market weekday → go back to yesterday
+    # If it's before 9:30 AM ET today (pre-market), fetch from
+    # the previous trading day's open instead
+    if now < market_open_et:
         market_open_et = market_open_et - timedelta(days=1)
 
     from_ts = int(market_open_et.timestamp())

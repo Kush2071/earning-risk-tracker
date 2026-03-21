@@ -1,6 +1,7 @@
 import math
 import random
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -35,8 +36,13 @@ app.add_middleware(
 )
 
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+ET = ZoneInfo("America/New_York")
 
 _startup_complete = False
+
+
+def now_et():
+    return datetime.now(ET).replace(tzinfo=None)
 
 
 def get_active_symbols_list(db):
@@ -44,6 +50,33 @@ def get_active_symbols_list(db):
     rows = db.query(PriceSnapshot.symbol).distinct().all()
     symbols = [r.symbol for r in rows]
     return symbols if symbols else WATCHLIST
+
+
+def store_intraday_for_symbol(db, symbol):
+    """
+    Fetch and store intraday candles for a symbol.
+    Used during startup and ingest to ensure all symbols
+    (hardcoded and search bar) get the same full-day data.
+    """
+    intraday = get_intraday_candles(symbol)
+    if intraday:
+        for c in intraday:
+            existing = db.query(PriceSnapshot).filter_by(
+                symbol=symbol,
+                timestamp=c["timestamp"]
+            ).first()
+            if not existing:
+                db.add(PriceSnapshot(
+                    symbol=symbol,
+                    asset_class="equity",
+                    price=round(c["price"], 2),
+                    volume=None,
+                    timestamp=c["timestamp"],
+                    is_delayed=True
+                ))
+        db.commit()
+        print(f"[Intraday] {symbol}: {len(intraday)} candles stored")
+    return intraday
 
 
 @app.on_event("startup")
@@ -62,27 +95,11 @@ async def startup_event():
             print("[Startup] Empty DB — running initial ingest...")
             run_full_ingest(db, WATCHLIST)
 
-        # Always fetch intraday from market open on startup
-        print("[Startup] Fetching intraday data from market open...")
+        # Always fetch intraday for all symbols on startup
+        # This ensures hardcoded stocks show full day chart same as search bar stocks
+        print("[Startup] Fetching intraday data...")
         for symbol in WATCHLIST:
-            intraday = get_intraday_candles(symbol)
-            if intraday:
-                for c in intraday:
-                    existing = db.query(PriceSnapshot).filter_by(
-                        symbol=symbol,
-                        timestamp=c["timestamp"]
-                    ).first()
-                    if not existing:
-                        db.add(PriceSnapshot(
-                            symbol=symbol,
-                            asset_class="equity",
-                            price=round(c["price"], 2),
-                            volume=None,
-                            timestamp=c["timestamp"],
-                            is_delayed=True
-                        ))
-                db.commit()
-                print(f"[Startup] {symbol}: {len(intraday)} intraday candles loaded")
+            store_intraday_for_symbol(db, symbol)
 
         for symbol in WATCHLIST:
             compute_and_store_risk(db, symbol)
@@ -127,7 +144,7 @@ def live_price(symbol: str, db: Session = Depends(get_db)):
                 asset_class="equity",
                 price=price,
                 volume=None,
-                timestamp=datetime.utcnow(),
+                timestamp=now_et(),
                 is_delayed=True
             )
             db.add(snapshot)
@@ -146,8 +163,12 @@ def live_price(symbol: str, db: Session = Depends(get_db)):
 
 @app.post("/ingest/all")
 def trigger_full_ingest(db: Session = Depends(get_db)):
-    run_full_ingest(db, WATCHLIST)
-    return {"status": "done", "symbols": WATCHLIST}
+    symbols = get_active_symbols_list(db)
+    run_full_ingest(db, symbols)
+    # Also fetch intraday for all symbols so charts are always up to date
+    for symbol in symbols:
+        store_intraday_for_symbol(db, symbol)
+    return {"status": "done", "symbols": symbols}
 
 
 @app.post("/ingest/earnings")
@@ -158,37 +179,40 @@ def trigger_earnings(db: Session = Depends(get_db)):
 
 @app.post("/ingest/prices")
 def trigger_prices(db: Session = Depends(get_db)):
-    for symbol in WATCHLIST:
+    symbols = get_active_symbols_list(db)
+    for symbol in symbols:
         ingest_price_snapshot(db, symbol)
-    return {"status": "done", "symbols": WATCHLIST}
+    return {"status": "done", "symbols": symbols}
 
 
 @app.post("/ingest/sentiment")
 def trigger_sentiment(db: Session = Depends(get_db)):
-    for symbol in WATCHLIST:
+    symbols = get_active_symbols_list(db)
+    for symbol in symbols:
         ingest_sentiment(db, symbol)
-    return {"status": "done", "symbols": WATCHLIST}
+    return {"status": "done", "symbols": symbols}
 
 
 @app.post("/ingest/risk")
 def trigger_risk(db: Session = Depends(get_db)):
-    for symbol in WATCHLIST:
+    symbols = get_active_symbols_list(db)
+    for symbol in symbols:
         compute_and_store_risk(db, symbol)
-    return {"status": "done", "symbols": WATCHLIST}
+    return {"status": "done", "symbols": symbols}
 
 
 @app.post("/ingest/symbol/{symbol}")
 def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
     """
-    Add a new symbol — fetch real historical data from Finnhub,
-    fall back to synthetic if Finnhub returns nothing.
+    Add a new symbol — fetch real historical + intraday data from Finnhub.
+    No synthetic data — all stocks behave identically.
     """
     s = symbol.upper()
 
-    # Step 1: get current price
+    # Step 1: get current price snapshot (ET timestamp)
     ingest_price_snapshot(db, s)
 
-    # Step 2: try to get real historical daily candles
+    # Step 2: fetch real historical daily candles
     print(f"[Seed] Fetching real historical data for {s}...")
     candles = get_historical_candles(s, days=60)
 
@@ -210,71 +234,15 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                 ))
         db.commit()
     else:
-        # Fallback to synthetic daily history if Finnhub returns nothing
-        print(f"[Seed] No Finnhub daily data for {s}, using synthetic history")
-        price_row = db.query(PriceSnapshot).filter_by(symbol=s)\
-                      .order_by(PriceSnapshot.timestamp.desc()).first()
-        if price_row:
-            current_price = price_row.price
-            today = datetime.utcnow()
-            for i in range(60):
-                ret = random.gauss(0, 0.02)
-                synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
-                ts = today - timedelta(days=(60 - i))
-                db.add(PriceSnapshot(
-                    symbol=s, asset_class="equity",
-                    price=round(synthetic_price, 2),
-                    volume=None, timestamp=ts, is_delayed=True
-                ))
-            db.commit()
+        print(f"[Seed] No Finnhub daily data for {s}")
 
-    # Step 3: Always fetch today's intraday candles unconditionally.
-    # Previously inside `if candles:` so new symbols with no daily data
-    # never got intraday either, causing the 1D chart to show one dot.
+    # Step 3: fetch real intraday candles (same as hardcoded stocks)
+    # No synthetic fallback — if market is closed, chart shows last known
+    # daily close, same behaviour as all other symbols
     print(f"[Seed] Fetching intraday candles for {s}...")
-    intraday = get_intraday_candles(s)
-
-    if intraday:
-        for c in intraday:
-            existing = db.query(PriceSnapshot).filter_by(
-                symbol=s,
-                timestamp=c["timestamp"]
-            ).first()
-            if not existing:
-                db.add(PriceSnapshot(
-                    symbol=s,
-                    asset_class="equity",
-                    price=round(c["price"], 2),
-                    volume=None,
-                    timestamp=c["timestamp"],
-                    is_delayed=True
-                ))
-        db.commit()
-        print(f"[Seed] Added {len(intraday)} intraday candles for {s}")
-    else:
-        # FIX 3: Market is closed — Finnhub returns no intraday data for new symbols
-        # added outside market hours. Generate synthetic intraday candles anchored to
-        # the last known price so the 1D chart shows a full session instead of one dot.
-        print(f"[Seed] No intraday data for {s} (market closed) — generating synthetic intraday")
-        last = db.query(PriceSnapshot).filter_by(symbol=s)\
-                 .order_by(PriceSnapshot.timestamp.desc()).first()
-        if last:
-            # Simulate from 09:30 UTC today with 5-min candles (78 = full session)
-            today = datetime.utcnow().replace(hour=9, minute=30, second=0, microsecond=0)
-            base_price = last.price
-            for i in range(78):
-                noise = random.gauss(0, 0.001)
-                synthetic_price = base_price * (1 + noise * (i / 78))
-                ts = today + timedelta(minutes=5 * i)
-                existing = db.query(PriceSnapshot).filter_by(symbol=s, timestamp=ts).first()
-                if not existing:
-                    db.add(PriceSnapshot(
-                        symbol=s, asset_class="equity",
-                        price=round(synthetic_price, 2),
-                        volume=None, timestamp=ts, is_delayed=True
-                    ))
-            db.commit()
-            print(f"[Seed] Generated 78 synthetic intraday candles for {s}")
+    intraday = store_intraday_for_symbol(db, s)
+    if not intraday:
+        print(f"[Seed] No intraday data for {s} — market may be closed, will populate on next market open")
 
     # Step 4: compute risk
     compute_and_store_risk(db, s)
@@ -295,8 +263,7 @@ def seed_history(
     seeded  = []
 
     for symbol in symbols:
-        existing_count = db.query(PriceSnapshot)\
-                           .filter_by(symbol=symbol).count()
+        existing_count = db.query(PriceSnapshot).filter_by(symbol=symbol).count()
 
         if existing_count > 100 and not force:
             print(f"[Seed] {symbol} has {existing_count} snapshots, use force=true to reseed")
@@ -324,39 +291,17 @@ def seed_history(
                 ))
             db.commit()
         else:
-            print(f"[Seed] No Finnhub data for {symbol}, using synthetic")
-            current_price = 100.0
-            today = datetime.utcnow()
-            for i in range(60):
-                ret = random.gauss(0, 0.012)
-                synthetic_price = current_price * math.exp(-ret * (60 - i) / 60)
-                ts = today - timedelta(days=(60 - i))
-                db.add(PriceSnapshot(
-                    symbol=symbol, asset_class="equity",
-                    price=round(synthetic_price, 2),
-                    volume=None, timestamp=ts, is_delayed=True
-                ))
-            db.commit()
-            seeded.append(f"{symbol}(synthetic)")
+            # No Finnhub data — skip this symbol entirely, no fake $100 prices
+            print(f"[Seed] No Finnhub data for {symbol}, skipping")
+            seeded.append(f"{symbol}(skipped - no data)")
             continue
 
-        # Always fetch intraday regardless of whether daily candles succeeded
-        intraday = get_intraday_candles(symbol)
+        # Fetch intraday for today
+        intraday = store_intraday_for_symbol(db, symbol)
+        count_str = f"{len(candles)} daily"
         if intraday:
-            for c in intraday:
-                db.add(PriceSnapshot(
-                    symbol=symbol,
-                    asset_class="equity",
-                    price=round(c["price"], 2),
-                    volume=None,
-                    timestamp=c["timestamp"],
-                    is_delayed=True
-                ))
-            db.commit()
-            print(f"[Seed] Added {len(intraday)} intraday candles for {symbol}")
-            seeded.append(f"{symbol}({len(candles)} real + {len(intraday)} intraday)")
-        else:
-            seeded.append(f"{symbol}({len(candles)} real)")
+            count_str += f" + {len(intraday)} intraday"
+        seeded.append(f"{symbol}({count_str})")
 
     # Recompute risk for all
     for symbol in symbols:
@@ -372,17 +317,17 @@ def seed_history(
 def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
     """
     Force delete ALL price data for a symbol and fetch fresh
-    real historical data from Finnhub.
+    real historical + intraday data from Finnhub.
     """
     s = symbol.upper()
 
-    # Count and delete everything
+    # Delete everything
     count = db.query(PriceSnapshot).filter_by(symbol=s).count()
     db.query(PriceSnapshot).filter_by(symbol=s).delete()
     db.commit()
     print(f"[ForceReseed] Deleted {count} snapshots for {s}")
 
-    # Fetch real daily candles from Finnhub
+    # Fetch real daily candles
     candles = get_historical_candles(s, days=90)
     daily_count = 0
 
@@ -402,25 +347,11 @@ def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
     else:
         print(f"[ForceReseed] No Finnhub daily data for {s}")
 
-    # Fetch today's intraday candles (always, unconditionally)
-    intraday = get_intraday_candles(s)
-    intraday_count = 0
+    # Fetch intraday
+    intraday = store_intraday_for_symbol(db, s)
+    intraday_count = len(intraday) if intraday else 0
 
-    if intraday:
-        for c in intraday:
-            db.add(PriceSnapshot(
-                symbol=s,
-                asset_class="equity",
-                price=round(c["price"], 2),
-                volume=None,
-                timestamp=c["timestamp"],
-                is_delayed=True
-            ))
-        db.commit()
-        intraday_count = len(intraday)
-        print(f"[ForceReseed] Added {intraday_count} intraday candles for {s}")
-
-    # Also get current live price
+    # Current live price
     ingest_price_snapshot(db, s)
 
     # Recompute risk
@@ -605,27 +536,11 @@ def scheduler_status():
 
 @app.post("/ingest/intraday")
 def trigger_intraday(db: Session = Depends(get_db)):
-    """Fetch today's intraday candles from market open for all symbols."""
+    """Fetch today's intraday candles for all active symbols."""
     symbols = get_active_symbols_list(db)
     results = []
     for symbol in symbols:
-        intraday = get_intraday_candles(symbol)
+        intraday = store_intraday_for_symbol(db, symbol)
         if intraday:
-            for c in intraday:
-                existing = db.query(PriceSnapshot).filter_by(
-                    symbol=symbol,
-                    timestamp=c["timestamp"]
-                ).first()
-                if not existing:
-                    db.add(PriceSnapshot(
-                        symbol=symbol,
-                        asset_class="equity",
-                        price=round(c["price"], 2),
-                        volume=None,
-                        timestamp=c["timestamp"],
-                        is_delayed=True
-                    ))
-            db.commit()
             results.append(f"{symbol}({len(intraday)} candles)")
-            print(f"[Intraday] {symbol}: {len(intraday)} candles")
     return {"status": "done", "results": results}

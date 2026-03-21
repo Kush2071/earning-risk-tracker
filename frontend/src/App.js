@@ -7,7 +7,6 @@ const API = 'https://earning-risk-tracker-production.up.railway.app';
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'];
 const REFRESH_INTERVAL  = 40000;
 
-// Range-aware fetch limits so 5D and 1M have enough records
 const RANGE_LIMITS = { '1D': 500, '5D': 2500, '1M': 10000 };
 
 const COLORS = {
@@ -53,13 +52,12 @@ function isMarketOpen() {
 }
 
 function PriceChart({ symbol, refreshTick }) {
-  const [data, setData]           = useState([]);
-  const [range, setRange]         = useState('1D');
-  // FIX 1: track the resolved date so tooltip can show it instead of "Last session"
+  const [data, setData]             = useState([]);
+  const [range, setRange]           = useState('1D');
   const [targetDate, setTargetDate] = useState('');
-  const marketOpen                = isMarketOpen();
-  const RANGES                    = ['1D', '5D', '1M'];
-  const activeTick                = marketOpen ? refreshTick : 0;
+  const marketOpen                  = isMarketOpen();
+  const RANGES                      = ['1D', '5D', '1M'];
+  const activeTick                  = marketOpen ? refreshTick : 0;
 
   useEffect(() => {
     const limit = RANGE_LIMITS[range];
@@ -69,56 +67,44 @@ function PriceChart({ symbol, refreshTick }) {
       let filtered;
 
       if (range === '1D') {
-  const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
-
-  // Find the most recent date that has more than 1 data point
-  // This skips today's single live-price snapshots and shows
-  // the last full trading session instead
-  let resolved = dates[dates.length - 1];
-  for (let i = dates.length - 1; i >= 0; i--) {
-    const count = all.filter(d => d.timestamp.slice(0, 10) === dates[i]).length;
-    if (count > 1) {
-      resolved = dates[i];
-      break;
-    }
-  }
-
-  setTargetDate(resolved);
-  filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
-  if (filtered.length === 0) filtered = all.slice(-30);
+        const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
+        // Find most recent date with more than 1 data point
+        // This skips today's single live-price snapshots and shows last full session
+        let resolved = dates[dates.length - 1];
+        for (let i = dates.length - 1; i >= 0; i--) {
+          const count = all.filter(d => d.timestamp.slice(0, 10) === dates[i]).length;
+          if (count > 1) { resolved = dates[i]; break; }
+        }
+        setTargetDate(resolved);
+        filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
+        if (filtered.length === 0) filtered = all.slice(-30);
 
       } else if (range === '5D') {
-        // FIX 2: deduplicate to one point per day (last price) to avoid gaps
-        // between midnight daily candles and intraday candles
         const cutoff = new Date(now - 5 * 24 * 60 * 60 * 1000);
         const inRange = all.filter(d => new Date(d.timestamp) >= cutoff);
         const byDate = {};
         inRange.forEach(d => { byDate[d.timestamp.slice(0, 10)] = d; });
-        filtered = Object.values(byDate).sort((a, b) =>
-          a.timestamp.localeCompare(b.timestamp));
+        filtered = Object.values(byDate).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         if (filtered.length === 0) filtered = all.slice(-7);
 
       } else {
-        // FIX 2: 1M — one point per day to avoid cramping and flat-line effect
         const byDate = {};
         all.forEach(d => { byDate[d.timestamp.slice(0, 10)] = d; });
-        filtered = Object.values(byDate).sort((a, b) =>
-          a.timestamp.localeCompare(b.timestamp));
+        filtered = Object.values(byDate).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
       }
 
       setData(filtered.map(d => {
-  // Timestamps are stored in ET — parse directly from string
-  // without adding 'Z' to avoid UTC timezone shift
-  const parts = d.timestamp.split(' ');
-  const datePart = parts[0]; // "2026-03-20"
-  const timePart = parts[1] || '00:00:00'; // "10:30:00"
-  const [hh, min] = timePart.split(':');
-  const [, mm, dd] = datePart.split('-');
-  return {
-    name:  range === '1D' ? `${hh}:${min}` : `${mm}/${dd}`,
-    price: d.price,
-  };
-}));
+        // Parse directly from string — no UTC conversion to avoid timezone shift
+        const parts    = d.timestamp.split(' ');
+        const datePart = parts[0];
+        const timePart = parts[1] || '00:00:00';
+        const [hh, min] = timePart.split(':');
+        const [, mm, dd] = datePart.split('-');
+        return {
+          name:  range === '1D' ? `${hh}:${min}` : `${mm}/${dd}`,
+          price: d.price,
+        };
+      }));
     });
   }, [symbol, range, activeTick]);
 
@@ -182,12 +168,7 @@ function PriceChart({ symbol, refreshTick }) {
             />
             <Tooltip
               formatter={v => [`$${Number(v).toFixed(2)}`, 'Price']}
-              // FIX 1: show actual date instead of generic "Last session"
-              labelFormatter={l =>
-                range === '1D'
-                  ? `${targetDate} ${l}`
-                  : `Date: ${l}`
-              }
+              labelFormatter={l => range === '1D' ? `${targetDate} ${l}` : `Date: ${l}`}
               contentStyle={{ fontSize: 11, borderRadius: 6 }}
             />
           </LineChart>
@@ -213,7 +194,6 @@ function StockCard({ symbol, onRemove, refreshTick }) {
         }
       }).catch(() => {});
     }
-
     axios.get(`${API}/prices/${symbol}?limit=200`).then(res => setPrices(res.data));
     axios.get(`${API}/risk/${symbol}`).then(res => setRisk(res.data));
     axios.get(`${API}/expected-move/${symbol}?days=1`).then(res => setMove(res.data));
@@ -232,6 +212,13 @@ function StockCard({ symbol, onRemove, refreshTick }) {
   const changeDol  = livePrice?.change ?? (price != null && prevClose != null ? price - prevClose : null);
   const changePct  = livePrice?.change_pct ?? (changeDol != null && prevClose ? (changeDol / prevClose) * 100 : null);
   const isPositive = changeDol != null ? changeDol >= 0 : true;
+
+  const alphaColor = a => {
+    if (a == null) return COLORS.neutral;
+    if (a > 0)  return COLORS.positive;
+    if (a < 0)  return COLORS.negative;
+    return COLORS.neutral;
+  };
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20, position: 'relative' }}>
@@ -286,6 +273,12 @@ function StockCard({ symbol, onRemove, refreshTick }) {
               <span>Sharpe ratio</span>
               <span style={{ fontWeight: 500, color: risk.sharpe > 0 ? COLORS.positive : COLORS.negative }}>
                 {risk.sharpe?.toFixed(2)}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span>Alpha (vs S&P 500)</span>
+              <span style={{ fontWeight: 500, color: alphaColor(risk.alpha) }}>
+                {risk.alpha != null ? `${risk.alpha > 0 ? '+' : ''}${risk.alpha?.toFixed(2)}%` : '—'}
               </span>
             </div>
           </>
@@ -441,6 +434,7 @@ function RiskTable({ watchlist }) {
 
   const maxVol = Math.max(...data.map(d => d.volatility_30d || 0));
   const maxVar = Math.max(...data.map(d => d.var_95 || 0));
+
   const sharpeColor = s => {
     if (s == null) return COLORS.neutral;
     if (s > 1)  return COLORS.positive;
@@ -449,11 +443,18 @@ function RiskTable({ watchlist }) {
     return COLORS.negative;
   };
 
+  const alphaColor = a => {
+    if (a == null) return COLORS.neutral;
+    if (a > 0)  return COLORS.positive;
+    if (a < 0)  return COLORS.negative;
+    return COLORS.neutral;
+  };
+
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
       <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 4 }}>Risk summary</div>
       <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
-        Sharpe &gt; 1 = good · 0–1 = acceptable · &lt; 0 = negative risk-adjusted return
+        Sharpe &gt; 1 = good · Alpha &gt; 0 = outperforming S&P 500 · Beta = market sensitivity
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
@@ -465,6 +466,7 @@ function RiskTable({ watchlist }) {
             <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500, width: 110 }}>VaR bar</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Sharpe</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Beta</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Alpha</th>
           </tr>
         </thead>
         <tbody>
@@ -487,6 +489,11 @@ function RiskTable({ watchlist }) {
                 <span style={{ color: sharpeColor(r.sharpe) }}>{r.sharpe?.toFixed(2) ?? '—'}</span>
               </td>
               <td style={{ padding: '8px 8px', textAlign: 'right' }}>{r.beta?.toFixed(2) ?? '—'}</td>
+              <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 500 }}>
+                <span style={{ color: alphaColor(r.alpha) }}>
+                  {r.alpha != null ? `${r.alpha > 0 ? '+' : ''}${r.alpha?.toFixed(2)}%` : '—'}
+                </span>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -509,9 +516,7 @@ function ExpectedMovePanel({ watchlist }) {
     ).then(setData);
   }, [watchlist]);
 
-  useEffect(() => {
-    fetchData(days);
-  }, [watchlist, days, fetchData]);
+  useEffect(() => { fetchData(days); }, [watchlist, days, fetchData]);
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
@@ -561,9 +566,7 @@ function PositionSizer({ watchlist }) {
     ).then(r => setResults(r.filter(x => x.shares)));
   }, [watchlist, portfolio, riskPct]);
 
-  useEffect(() => {
-    calculate();
-  }, [watchlist, calculate]);
+  useEffect(() => { calculate(); }, [watchlist, calculate]);
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>

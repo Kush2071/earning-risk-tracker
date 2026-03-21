@@ -1,6 +1,7 @@
 import httpx
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,6 +11,21 @@ API_KEY  = "d6ti17pr01qhkb449fq0d6ti17pr01qhkb449fqg"
 
 HEADERS  = {"X-Finnhub-Token": API_KEY}
 TIMEOUT  = httpx.Timeout(30.0, connect=10.0)
+
+# Use ET everywhere — no more UTC confusion
+ET = ZoneInfo("America/New_York")
+
+
+def now_et() -> datetime:
+    """Current time in ET."""
+    return datetime.now(ET)
+
+
+def today_et() -> datetime:
+    """Today's date in ET at midnight."""
+    n = now_et()
+    return n.replace(hour=0, minute=0, second=0, microsecond=0)
+
 
 BULLISH_WORDS = [
     "beat", "surpass", "record", "growth", "upgrade", "strong", "profit",
@@ -40,9 +56,9 @@ def score_headline(headline: str) -> float:
 
 def get_earnings_calendar(from_date: str = None, to_date: str = None) -> list:
     if not from_date:
-        from_date = datetime.today().strftime("%Y-%m-%d")
+        from_date = today_et().strftime("%Y-%m-%d")
     if not to_date:
-        to_date = (datetime.today() + timedelta(days=14)).strftime("%Y-%m-%d")
+        to_date = (today_et() + timedelta(days=14)).strftime("%Y-%m-%d")
     resp = httpx.get(
         f"{BASE_URL}/calendar/earnings",
         headers=HEADERS,
@@ -66,9 +82,9 @@ def get_quote(symbol: str) -> dict:
 
 def get_company_news(symbol: str, from_date: str = None, to_date: str = None) -> list:
     if not from_date:
-        from_date = (datetime.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+        from_date = (today_et() - timedelta(days=7)).strftime("%Y-%m-%d")
     if not to_date:
-        to_date = datetime.today().strftime("%Y-%m-%d")
+        to_date = today_et().strftime("%Y-%m-%d")
     resp = httpx.get(
         f"{BASE_URL}/company-news",
         headers=HEADERS,
@@ -112,12 +128,13 @@ def search_symbols(query: str) -> list:
 
 def get_historical_candles(symbol: str, days: int = 60) -> list:
     """
-    Fetch historical daily candles from Finnhub.
+    Fetch historical daily candles from Finnhub using ET dates.
     Falls back to weekly if daily returns nothing.
-    Returns list of {timestamp, price} dicts.
+    Returns list of {timestamp, price} dicts with naive ET datetimes.
     """
-    to_ts   = int(datetime.today().timestamp())
-    from_ts = int((datetime.today() - timedelta(days=days)).timestamp())
+    now     = now_et()
+    to_ts   = int(now.timestamp())
+    from_ts = int((now - timedelta(days=days)).timestamp())
 
     # Try daily first
     resp = httpx.get(
@@ -135,11 +152,15 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 
     if data.get("s") == "ok" and data.get("c"):
         return [
-            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+            {
+                # Convert unix timestamp → ET datetime (naive, for DB storage)
+                "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
+                "price": c
+            }
             for t, c in zip(data["t"], data["c"])
         ]
 
-    # Fall back to weekly if daily fails
+    # Fall back to weekly
     resp = httpx.get(
         f"{BASE_URL}/stock/candle",
         headers=HEADERS,
@@ -155,7 +176,10 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 
     if data.get("s") == "ok" and data.get("c"):
         return [
-            {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+            {
+                "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
+                "price": c
+            }
             for t, c in zip(data["t"], data["c"])
         ]
 
@@ -164,30 +188,30 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 
 def get_intraday_candles(symbol: str) -> list:
     """
-    Fetch today's intraday 1-hour candles from market open (9:30 AM ET)
-    to now. Works for both hardcoded and search bar stocks.
-
-    Uses a 2-day window to handle UTC rollover — e.g. after 7 PM ET
-    (midnight UTC) today's ET session is still within the last 24hrs UTC
-    but the date has already flipped, so we always fetch from 2 days ago
-    and filter to only keep candles from today's ET session.
-
-    Market open  = 14:30 UTC (9:30 AM ET)
-    Market close = 21:00 UTC (4:00 PM ET)
+    Fetch today's intraday 1-hour candles using ET time.
+    Fetches from today's market open (9:30 AM ET) to now.
+    Always uses ET so the date is always correct regardless of
+    what UTC thinks the date is.
     """
-    now_utc = datetime.utcnow()
+    now = now_et()
 
-    # Always fetch a 2-day window to avoid missing today's session
-    # due to UTC/ET timezone differences
-    to_ts   = int(now_utc.timestamp())
-    from_ts = int((now_utc - timedelta(days=2)).timestamp())
+    # Today's market open in ET = 9:30 AM ET
+    market_open_et = now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    # If it's before 9:30 AM ET today (pre-market), fetch from
+    # the previous trading day's open instead
+    if now < market_open_et:
+        market_open_et = market_open_et - timedelta(days=1)
+
+    from_ts = int(market_open_et.timestamp())
+    to_ts   = int(now.timestamp())
 
     resp = httpx.get(
         f"{BASE_URL}/stock/candle",
         headers=HEADERS,
         params={
             "symbol":     symbol,
-            "resolution": "60",   # 1-hour candles
+            "resolution": "60",  # 1-hour candles
             "from":       from_ts,
             "to":         to_ts
         },
@@ -198,33 +222,11 @@ def get_intraday_candles(symbol: str) -> list:
     if not (data.get("s") == "ok" and data.get("c")):
         return []
 
-    candles = [
-        {"timestamp": datetime.utcfromtimestamp(t), "price": c}
+    return [
+        {
+            # Store as ET datetime (naive) so date always matches ET trading day
+            "timestamp": datetime.fromtimestamp(t, tz=ET).replace(tzinfo=None),
+            "price": c
+        }
         for t, c in zip(data["t"], data["c"])
     ]
-
-    # Filter to only today's ET session:
-    # Market open = 14:30 UTC, market close = 21:00 UTC
-    # Use ET date: if UTC hour < 5, we're still on "yesterday ET"
-    # so the trading day started at 14:30 UTC of the previous UTC day.
-    if now_utc.hour < 5:
-        # After midnight UTC but before 5 AM UTC = still previous ET day's session
-        session_start = now_utc.replace(
-            hour=14, minute=30, second=0, microsecond=0
-        ) - timedelta(days=1)
-    else:
-        session_start = now_utc.replace(
-            hour=14, minute=30, second=0, microsecond=0
-        )
-
-    session_end = session_start + timedelta(hours=6, minutes=30)  # 4:00 PM ET
-
-    # Keep candles within today's session window
-    today_candles = [
-        c for c in candles
-        if session_start <= c["timestamp"] <= session_end
-    ]
-
-    # If we got session candles, return those; otherwise return all fetched candles
-    # (handles pre-market or extended hours edge cases)
-    return today_candles if today_candles else candles

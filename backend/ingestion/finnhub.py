@@ -209,7 +209,6 @@ def get_historical_candles(symbol: str, days: int = 60) -> list:
 
     time_series = data.get("Time Series (Daily)")
     if not time_series:
-        print(f"[AV] No daily data for {symbol}: {data.get('Note') or data.get('Information') or 'unknown'}")
         return []
 
     candles = []
@@ -279,5 +278,4 @@ def get_intraday_candles(symbol: str) -> list:
             continue
 
     candles.sort(key=lambda x: x["timestamp"])
-    print(f"[TD] {symbol}: {len(candles)} intraday candles for {trading_day_str}")
     return candles

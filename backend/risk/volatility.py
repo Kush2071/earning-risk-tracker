@@ -44,10 +44,6 @@ def get_spy_returns() -> List[float]:
         data        = resp.json()
         time_series = data.get("Time Series (Daily)")
 
-        if not time_series:
-            print(f"[SPY] Could not fetch benchmark: {data.get('Note') or data.get('Information') or 'unknown'}")
-            return []
-
         prices = [
             float(v["4. close"])
             for _, v in sorted(time_series.items())
@@ -56,9 +52,7 @@ def get_spy_returns() -> List[float]:
 
         _spy_returns_cache["returns"]   = returns
         _spy_returns_cache["fetched_at"] = now
-        print(f"[SPY] Fetched {len(returns)} daily returns for benchmark")
-        return returns
-
+       
     except Exception as e:
         print(f"[SPY] Failed to fetch benchmark data: {e}")
         return []
@@ -235,5 +229,4 @@ def compute_and_store_risk(db: Session, symbol: str):
     )
     db.add(record)
     db.commit()
-    print(f"[Risk] {symbol}: vol={vol:.4f} var95=${var_95:.2f} beta={beta} alpha={alpha:.2f}% sharpe={sharpe:.2f}")
     return {"vol": vol, "var_95": var_95, "beta": beta, "alpha": alpha, "sharpe": sharpe, "price": prices[-1]}

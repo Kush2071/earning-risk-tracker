@@ -33,9 +33,9 @@ def get_active_symbols():
 
 
 def scheduled_ingest():
+    def scheduled_ingest():
     """Job that runs every 15 minutes during market hours."""
     symbols = get_active_symbols()
-    logger.info(f"[Scheduler] Running scheduled ingest for {symbols}...")
     db = SessionLocal()
     try:
         run_full_ingest(db, symbols)

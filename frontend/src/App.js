@@ -69,14 +69,12 @@ function PriceChart({ symbol, refreshTick }) {
       let filtered;
 
       if (range === '1D') {
-        // FIX 1: always resolve to the most recent trading day in the dataset
-        const dates  = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
-        const nowUTC = new Date().toISOString().slice(0, 10);
-        const resolved = dates.includes(nowUTC) ? nowUTC : (dates[dates.length - 1] || nowUTC);
-        // Store resolved date so tooltip can display it
-        setTargetDate(resolved);
-        filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
-        if (filtered.length === 0) filtered = all.slice(-30);
+  const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
+  // Always just use the most recent date in the dataset — no timezone comparison
+  const resolved = dates[dates.length - 1];
+  setTargetDate(resolved);
+  filtered = all.filter(d => d.timestamp.slice(0, 10) === resolved);
+  if (filtered.length === 0) filtered = all.slice(-30);
 
       } else if (range === '5D') {
         // FIX 2: deduplicate to one point per day (last price) to avoid gaps

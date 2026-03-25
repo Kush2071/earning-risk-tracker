@@ -6,8 +6,7 @@ import axios from 'axios';
 const API = 'https://earning-risk-tracker-production.up.railway.app';
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'];
 const REFRESH_INTERVAL  = 40000;
-
-const RANGE_LIMITS = { '1D': 500, '5D': 2500, '1M': 10000 };
+const RANGE_LIMITS      = { '1D': 500, '5D': 2500, '1M': 10000 };
 
 const COLORS = {
   positive: '#1D9E75',
@@ -43,12 +42,8 @@ function isMarketOpen() {
   const now = new Date();
   const day = now.getDay();
   if (day === 0 || day === 6) return false;
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const totalMinutes = hours * 60 + minutes;
-  const marketOpen  = 9 * 60 + 30;
-  const marketClose = 16 * 60;
-  return totalMinutes >= marketOpen && totalMinutes < marketClose;
+  const totalMinutes = now.getHours() * 60 + now.getMinutes();
+  return totalMinutes >= 9 * 60 + 30 && totalMinutes < 16 * 60;
 }
 
 function PriceChart({ symbol, refreshTick }) {
@@ -68,8 +63,6 @@ function PriceChart({ symbol, refreshTick }) {
 
       if (range === '1D') {
         const dates = [...new Set(all.map(d => d.timestamp.slice(0, 10)))].sort();
-        // Find most recent date with more than 1 data point
-        // This skips today's single live-price snapshots and shows last full session
         let resolved = dates[dates.length - 1];
         for (let i = dates.length - 1; i >= 0; i--) {
           const count = all.filter(d => d.timestamp.slice(0, 10) === dates[i]).length;
@@ -94,7 +87,6 @@ function PriceChart({ symbol, refreshTick }) {
       }
 
       setData(filtered.map(d => {
-        // Parse directly from string — no UTC conversion to avoid timezone shift
         const parts    = d.timestamp.split(' ');
         const datePart = parts[0];
         const timePart = parts[1] || '00:00:00';
@@ -114,13 +106,9 @@ function PriceChart({ symbol, refreshTick }) {
     </div>
   );
 
-  const minP       = Math.min(...data.map(d => d.price)) * 0.995;
-  const maxP       = Math.max(...data.map(d => d.price)) * 1.005;
-  const firstPrice = data[0]?.price;
-  const lastPrice  = data[data.length - 1]?.price;
-  const lineColor  = (lastPrice != null && firstPrice != null)
-    ? (lastPrice >= firstPrice ? COLORS.positive : COLORS.negative)
-    : COLORS.blue;
+  const minP      = Math.min(...data.map(d => d.price)) * 0.995;
+  const maxP      = Math.max(...data.map(d => d.price)) * 1.005;
+  const lineColor = (data[data.length-1]?.price ?? 0) >= (data[0]?.price ?? 0) ? COLORS.positive : COLORS.negative;
 
   return (
     <div>
@@ -133,8 +121,7 @@ function PriceChart({ symbol, refreshTick }) {
             <button key={r} onClick={() => setRange(r)} style={{
               padding: '2px 8px', borderRadius: 4, border: '1px solid #eee', cursor: 'pointer',
               background: range === r ? COLORS.blue : '#f7f7f5',
-              color: range === r ? '#fff' : '#888',
-              fontSize: 10, fontWeight: 500
+              color: range === r ? '#fff' : '#888', fontSize: 10, fontWeight: 500
             }}>{r}</button>
           ))}
         </div>
@@ -142,30 +129,9 @@ function PriceChart({ symbol, refreshTick }) {
       <div style={{ width: '100%', height: 120 }}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-            <XAxis
-              dataKey="name"
-              tick={{ fontSize: 9, fill: '#bbb' }}
-              tickLine={false}
-              axisLine={false}
-              interval="preserveStartEnd"
-              minTickGap={30}
-            />
-            <YAxis
-              domain={[minP, maxP]}
-              tick={{ fontSize: 9, fill: '#bbb' }}
-              tickLine={false}
-              axisLine={false}
-              width={44}
-              tickFormatter={v => `$${v.toFixed(0)}`}
-            />
-            <Line
-              type="monotone"
-              dataKey="price"
-              stroke={lineColor}
-              strokeWidth={2}
-              dot={false}
-              isAnimationActive={false}
-            />
+            <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#bbb' }} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={30} />
+            <YAxis domain={[minP, maxP]} tick={{ fontSize: 9, fill: '#bbb' }} tickLine={false} axisLine={false} width={44} tickFormatter={v => `$${v.toFixed(0)}`} />
+            <Line type="monotone" dataKey="price" stroke={lineColor} strokeWidth={2} dot={false} isAnimationActive={false} />
             <Tooltip
               formatter={v => [`$${Number(v).toFixed(2)}`, 'Price']}
               labelFormatter={l => range === '1D' ? `${targetDate} ${l}` : `Date: ${l}`}
@@ -189,9 +155,7 @@ function StockCard({ symbol, onRemove, refreshTick }) {
   useEffect(() => {
     if (isMarketOpen()) {
       axios.get(`${API}/live-price/${symbol}`).then(res => {
-        if (res.data && res.data.price) {
-          setLivePrice(prev => ({ ...prev, ...res.data }));
-        }
+        if (res.data?.price) setLivePrice(prev => ({ ...prev, ...res.data }));
       }).catch(() => {});
     }
     axios.get(`${API}/prices/${symbol}?limit=200`).then(res => setPrices(res.data));
@@ -213,12 +177,7 @@ function StockCard({ symbol, onRemove, refreshTick }) {
   const changePct  = livePrice?.change_pct ?? (changeDol != null && prevClose ? (changeDol / prevClose) * 100 : null);
   const isPositive = changeDol != null ? changeDol >= 0 : true;
 
-  const alphaColor = a => {
-    if (a == null) return COLORS.neutral;
-    if (a > 0)  return COLORS.positive;
-    if (a < 0)  return COLORS.negative;
-    return COLORS.neutral;
-  };
+  const colorSign = v => v == null ? COLORS.neutral : v > 0 ? COLORS.positive : v < 0 ? COLORS.negative : COLORS.neutral;
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20, position: 'relative' }}>
@@ -264,20 +223,33 @@ function StockCard({ symbol, onRemove, refreshTick }) {
             </div>
             <div style={{ marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                <span>1-day VaR 95%</span>
+                <span>VaR 95%</span>
                 <span style={{ color: COLORS.negative, fontWeight: 500 }}>-${risk.var_95?.toFixed(2)}</span>
               </div>
               <MiniBar value={risk.var_95} max={20} color={COLORS.negative} bg="#fce8e2" />
             </div>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                <span>VaR 99%</span>
+                <span style={{ color: COLORS.negative, fontWeight: 500 }}>-${risk.var_99?.toFixed(2)}</span>
+              </div>
+              <MiniBar value={risk.var_99} max={30} color="#c0392b" bg="#fce8e2" />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span>Max drawdown</span>
+              <span style={{ fontWeight: 500, color: COLORS.negative }}>{risk.max_drawdown?.toFixed(2)}%</span>
+            </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
               <span>Sharpe ratio</span>
-              <span style={{ fontWeight: 500, color: risk.sharpe > 0 ? COLORS.positive : COLORS.negative }}>
-                {risk.sharpe?.toFixed(2)}
-              </span>
+              <span style={{ fontWeight: 500, color: colorSign(risk.sharpe) }}>{risk.sharpe?.toFixed(2)}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span>Sortino ratio</span>
+              <span style={{ fontWeight: 500, color: colorSign(risk.sortino) }}>{risk.sortino?.toFixed(2)}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
               <span>Alpha (vs S&P 500)</span>
-              <span style={{ fontWeight: 500, color: alphaColor(risk.alpha) }}>
+              <span style={{ fontWeight: 500, color: colorSign(risk.alpha) }}>
                 {risk.alpha != null ? `${risk.alpha > 0 ? '+' : ''}${risk.alpha?.toFixed(2)}%` : '—'}
               </span>
             </div>
@@ -339,10 +311,7 @@ function SearchBar({ watchlist, onAdd }) {
     if (query.length < 1) { setSuggestions([]); setShowDrop(false); return; }
     const timer = setTimeout(() => {
       axios.get(`${API}/search?q=${query}`)
-        .then(res => {
-          setSuggestions(res.data);
-          if (res.data.length > 0) setShowDrop(true);
-        })
+        .then(res => { setSuggestions(res.data); if (res.data.length > 0) setShowDrop(true); })
         .catch(() => setSuggestions([]));
     }, 350);
     return () => clearTimeout(timer);
@@ -371,13 +340,8 @@ function SearchBar({ watchlist, onAdd }) {
   return (
     <div style={{ position: 'relative' }} ref={dropRef}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <input
-          value={query}
-          onChange={e => { setQuery(e.target.value); setStatus(''); }}
-          onKeyDown={e => {
-            if (e.key === 'Enter') handleSelect(query);
-            if (e.key === 'Escape') setShowDrop(false);
-          }}
+        <input value={query} onChange={e => { setQuery(e.target.value); setStatus(''); }}
+          onKeyDown={e => { if (e.key === 'Enter') handleSelect(query); if (e.key === 'Escape') setShowDrop(false); }}
           onFocus={() => suggestions.length > 0 && setShowDrop(true)}
           placeholder="Search company or ticker..."
           style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd', fontSize: 13, width: 220 }}
@@ -385,20 +349,13 @@ function SearchBar({ watchlist, onAdd }) {
         <button onClick={() => handleSelect(query)} disabled={loading} style={{
           padding: '8px 16px', borderRadius: 8, border: 'none',
           background: COLORS.blue, color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 500
-        }}>
-          {loading ? '...' : '+ Add'}
-        </button>
-        {status && (
-          <span style={{ fontSize: 12, color: status.includes('added') ? COLORS.positive : '#888' }}>
-            {status}
-          </span>
-        )}
+        }}>{loading ? '...' : '+ Add'}</button>
+        {status && <span style={{ fontSize: 12, color: status.includes('added') ? COLORS.positive : '#888' }}>{status}</span>}
       </div>
-
       {showDrop && suggestions.length > 0 && (
         <div style={{
-          position: 'absolute', top: '100%', left: 0,
-          background: '#fff', border: '1px solid #e5e5e5', borderRadius: 8,
+          position: 'absolute', top: '100%', left: 0, background: '#fff',
+          border: '1px solid #e5e5e5', borderRadius: 8,
           boxShadow: '0 4px 16px rgba(0,0,0,0.12)', zIndex: 1000, marginTop: 4, minWidth: 300
         }}>
           {suggestions.map((s, i) => (
@@ -406,17 +363,13 @@ function SearchBar({ watchlist, onAdd }) {
               style={{
                 padding: '10px 14px', cursor: 'pointer', display: 'flex',
                 justifyContent: 'space-between', alignItems: 'center',
-                borderBottom: i < suggestions.length - 1 ? '1px solid #f5f5f5' : 'none',
-                fontSize: 13, transition: 'background 0.1s'
+                borderBottom: i < suggestions.length - 1 ? '1px solid #f5f5f5' : 'none', fontSize: 13
               }}
               onMouseEnter={e => e.currentTarget.style.background = '#f7f7f5'}
               onMouseLeave={e => e.currentTarget.style.background = '#fff'}
             >
               <span style={{ fontWeight: 500, color: COLORS.blue, minWidth: 60 }}>{s.symbol}</span>
-              <span style={{ color: '#666', fontSize: 12, textAlign: 'right',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
-                {s.name}
-              </span>
+              <span style={{ color: '#666', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>{s.name}</span>
             </div>
           ))}
         </div>
@@ -428,8 +381,7 @@ function SearchBar({ watchlist, onAdd }) {
 function RiskTable({ watchlist }) {
   const [data, setData] = useState([]);
   useEffect(() => {
-    const symbols = watchlist.join(',');
-    axios.get(`${API}/risk?symbols=${symbols}`).then(res => setData(res.data));
+    axios.get(`${API}/risk?symbols=${watchlist.join(',')}`).then(res => setData(res.data));
   }, [watchlist]);
 
   const maxVol = Math.max(...data.map(d => d.volatility_30d || 0));
@@ -437,34 +389,31 @@ function RiskTable({ watchlist }) {
 
   const sharpeColor = s => {
     if (s == null) return COLORS.neutral;
-    if (s > 1)  return COLORS.positive;
-    if (s > 0)  return '#8BC34A';
+    if (s > 1) return COLORS.positive;
+    if (s > 0) return '#8BC34A';
     if (s > -1) return COLORS.amber;
     return COLORS.negative;
   };
-
-  const alphaColor = a => {
-    if (a == null) return COLORS.neutral;
-    if (a > 0)  return COLORS.positive;
-    if (a < 0)  return COLORS.negative;
-    return COLORS.neutral;
-  };
+  const alphaColor = a => a == null ? COLORS.neutral : a > 0 ? COLORS.positive : a < 0 ? COLORS.negative : COLORS.neutral;
 
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
       <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 4 }}>Risk summary</div>
       <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
-        Sharpe &gt; 1 = good · Alpha &gt; 0 = outperforming S&P 500 · Beta = market sensitivity
+        Sharpe/Sortino &gt; 1 = good · Alpha &gt; 0 = outperforming S&P 500 · Max DD = worst peak-to-trough loss
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
         <thead>
           <tr style={{ borderBottom: '1px solid #eee', color: '#888' }}>
             <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500 }}>Symbol</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Volatility</th>
-            <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500, width: 110 }}>Vol bar</th>
+            <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500, width: 90 }}>Vol bar</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>VaR 95%</th>
-            <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500, width: 110 }}>VaR bar</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>VaR 99%</th>
+            <th style={{ textAlign: 'left',  padding: '6px 8px', fontWeight: 500, width: 90 }}>VaR bar</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Max DD</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Sharpe</th>
+            <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Sortino</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Beta</th>
             <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 500 }}>Alpha</th>
           </tr>
@@ -482,11 +431,20 @@ function RiskTable({ watchlist }) {
               <td style={{ padding: '8px 8px', textAlign: 'right', color: COLORS.negative, fontWeight: 500 }}>
                 -${r.var_95?.toFixed(2)}
               </td>
+              <td style={{ padding: '8px 8px', textAlign: 'right', color: '#c0392b', fontWeight: 500 }}>
+                -${r.var_99?.toFixed(2) ?? '—'}
+              </td>
               <td style={{ padding: '8px 8px' }}>
                 <MiniBar value={r.var_95} max={maxVar} color={COLORS.negative} bg="#fce8e2" />
               </td>
+              <td style={{ padding: '8px 8px', textAlign: 'right', color: COLORS.negative, fontWeight: 500 }}>
+                {r.max_drawdown?.toFixed(1)}%
+              </td>
               <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 500 }}>
                 <span style={{ color: sharpeColor(r.sharpe) }}>{r.sharpe?.toFixed(2) ?? '—'}</span>
+              </td>
+              <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 500 }}>
+                <span style={{ color: sharpeColor(r.sortino) }}>{r.sortino?.toFixed(2) ?? '—'}</span>
               </td>
               <td style={{ padding: '8px 8px', textAlign: 'right' }}>{r.beta?.toFixed(2) ?? '—'}</td>
               <td style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 500 }}>
@@ -498,6 +456,73 @@ function RiskTable({ watchlist }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CorrelationMatrix({ watchlist }) {
+  const [matrix, setMatrix] = useState(null);
+
+  useEffect(() => {
+    axios.get(`${API}/correlation?symbols=${watchlist.join(',')}`)
+      .then(res => {
+        if (!res.data.error) setMatrix(res.data);
+      })
+      .catch(() => {});
+  }, [watchlist]);
+
+  if (!matrix) return null;
+
+  const symbols = Object.keys(matrix);
+
+  const corrColor = v => {
+    if (v >= 0.8)  return '#c0392b';
+    if (v >= 0.5)  return '#e67e22';
+    if (v >= 0.2)  return '#f1c40f';
+    if (v >= -0.2) return '#95a5a6';
+    if (v >= -0.5) return '#3498db';
+    return '#2980b9';
+  };
+
+  return (
+    <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
+      <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 4 }}>Correlation matrix</div>
+      <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
+        How stocks move together · Red = high correlation · Blue = inverse · Grey = independent
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th style={{ padding: '6px 10px', color: '#888', fontWeight: 500 }}></th>
+              {symbols.map(s => (
+                <th key={s} style={{ padding: '6px 10px', color: '#888', fontWeight: 500, textAlign: 'center' }}>{s}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {symbols.map(s1 => (
+              <tr key={s1}>
+                <td style={{ padding: '6px 10px', fontWeight: 500 }}>{s1}</td>
+                {symbols.map(s2 => {
+                  const val = matrix[s1]?.[s2] ?? 0;
+                  const isDiag = s1 === s2;
+                  return (
+                    <td key={s2} style={{
+                      padding: '6px 10px', textAlign: 'center', fontWeight: isDiag ? 700 : 400,
+                      background: isDiag ? '#f7f7f5' : `${corrColor(val)}18`,
+                      color: isDiag ? '#555' : corrColor(val),
+                      borderRadius: 4
+                    }}>
+                      {val.toFixed(2)}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -528,14 +553,13 @@ function ExpectedMovePanel({ watchlist }) {
             <button key={d} onClick={() => { setDays(d); fetchData(d); }} style={{
               padding: '3px 10px', borderRadius: 6, border: '1px solid #ddd', cursor: 'pointer',
               background: days === d ? COLORS.blue : '#fff',
-              color: days === d ? '#fff' : '#555',
-              fontSize: 12, fontWeight: 500
+              color: days === d ? '#fff' : '#555', fontSize: 12, fontWeight: 500
             }}>{d}d</button>
           ))}
         </div>
       </div>
       <div style={{ fontSize: 12, color: '#aaa', marginBottom: 16 }}>
-        How much each stock could move based on historical volatility
+        Based on previous close + 30-day historical volatility — frozen for the trading day
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
         {data.filter(d => d.expected_move_dollar).map((d, i) => (
@@ -670,8 +694,7 @@ function EarningsTable() {
     <div style={{ background: '#fff', border: '1px solid #e5e5e5', borderRadius: 12, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <span style={{ fontWeight: 500, fontSize: 15 }}>Upcoming earnings</span>
-        <input placeholder="Filter by symbol..." value={filter}
-          onChange={e => setFilter(e.target.value)}
+        <input placeholder="Filter by symbol..." value={filter} onChange={e => setFilter(e.target.value)}
           style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #ddd', fontSize: 13 }} />
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -711,17 +734,13 @@ export default function App() {
     try {
       const saved = localStorage.getItem('watchlist');
       return saved ? JSON.parse(saved) : DEFAULT_WATCHLIST;
-    } catch {
-      return DEFAULT_WATCHLIST;
-    }
+    } catch { return DEFAULT_WATCHLIST; }
   });
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastUpdated, setLastUpdated] = useState(new Date().toLocaleTimeString());
   const [countdown, setCountdown]     = useState(40);
 
-  useEffect(() => {
-    localStorage.setItem('watchlist', JSON.stringify(watchlist));
-  }, [watchlist]);
+  useEffect(() => { localStorage.setItem('watchlist', JSON.stringify(watchlist)); }, [watchlist]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -741,11 +760,7 @@ export default function App() {
 
   const addSymbol    = s => { if (!watchlist.includes(s)) setWatchlist(prev => [...prev, s]); };
   const removeSymbol = s => setWatchlist(prev => prev.filter(x => x !== s));
-  const refresh      = () => {
-    setRefreshTick(t => t + 1);
-    setLastUpdated(new Date().toLocaleTimeString());
-    setCountdown(40);
-  };
+  const refresh      = () => { setRefreshTick(t => t + 1); setLastUpdated(new Date().toLocaleTimeString()); setCountdown(40); };
 
   return (
     <div style={{ minHeight: '100vh', background: '#f7f7f5', fontFamily: 'system-ui, sans-serif', padding: 24 }}>
@@ -770,6 +785,7 @@ export default function App() {
       </div>
 
       <div style={{ marginBottom: 24 }}><RiskTable watchlist={watchlist} /></div>
+      <div style={{ marginBottom: 24 }}><CorrelationMatrix watchlist={watchlist} /></div>
       <div style={{ marginBottom: 24 }}><ExpectedMovePanel watchlist={watchlist} /></div>
       <div style={{ marginBottom: 24 }}><PositionSizer watchlist={watchlist} /></div>
 

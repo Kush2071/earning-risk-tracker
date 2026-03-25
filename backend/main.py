@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from db.database import engine, Base, get_db
 import db.models
 from db.models import EarningsEvent, PriceSnapshot, SentimentRecord, RiskMetric
@@ -19,21 +20,29 @@ from risk.volatility import (
     compute_and_store_risk,
     calculate_returns,
     calculate_sharpe,
+    calculate_sortino,
     calculate_expected_move,
     calculate_position_size,
+    calculate_correlation_matrix,
+    calculate_var_99,
 )
 from scheduler import start_scheduler, stop_scheduler
 
 Base.metadata.create_all(bind=engine)
 
-# Run migrations for new columns not handled by create_all
-from sqlalchemy import text
+# Run migrations for new columns — safe to run on every startup
 with engine.connect() as conn:
-    try:
-        conn.execute(text("ALTER TABLE risk_metrics ADD COLUMN alpha FLOAT"))
-        conn.commit()
-    except Exception:
-        pass  # Column already exists, ignore
+    for col, typ in [
+        ("alpha",        "FLOAT"),
+        ("var_99",       "FLOAT"),
+        ("max_drawdown", "FLOAT"),
+        ("sortino",      "FLOAT"),
+    ]:
+        try:
+            conn.execute(text(f"ALTER TABLE risk_metrics ADD COLUMN {col} {typ}"))
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
 
 app = FastAPI(title="Earnings Risk Tracker")
 
@@ -61,56 +70,41 @@ def get_active_symbols_list(db):
 
 
 def store_intraday_for_symbol(db, symbol):
-    """Fetch and store intraday candles for a symbol."""
     intraday = get_intraday_candles(symbol)
     if intraday:
         for c in intraday:
             existing = db.query(PriceSnapshot).filter_by(
-                symbol=symbol,
-                timestamp=c["timestamp"]
+                symbol=symbol, timestamp=c["timestamp"]
             ).first()
             if not existing:
                 db.add(PriceSnapshot(
-                    symbol=symbol,
-                    asset_class="equity",
-                    price=round(c["price"], 2),
-                    volume=None,
-                    timestamp=c["timestamp"],
-                    is_delayed=True
+                    symbol=symbol, asset_class="equity",
+                    price=round(c["price"], 2), volume=None,
+                    timestamp=c["timestamp"], is_delayed=True
                 ))
         db.commit()
-        print(f"[Intraday] {symbol}: {len(intraday)} candles stored")
     return intraday
 
 
 @app.on_event("startup")
 async def startup_event():
     global _startup_complete
-
     if _startup_complete:
         return
-
     start_scheduler()
-
     db = next(get_db())
     try:
         count = db.query(PriceSnapshot).count()
         if count == 0:
-            print("[Startup] Empty DB — running initial ingest...")
             run_full_ingest(db, WATCHLIST)
-
-        print("[Startup] Fetching intraday data...")
         for symbol in WATCHLIST:
             store_intraday_for_symbol(db, symbol)
-
         for symbol in WATCHLIST:
             compute_and_store_risk(db, symbol)
-
     except Exception as e:
         print(f"[Startup] Failed: {e}")
     finally:
         db.close()
-
     _startup_complete = True
 
 
@@ -139,19 +133,13 @@ def live_price(symbol: str, db: Session = Depends(get_db)):
         quote = get_quote(symbol.upper())
         price = quote.get("c")
         pc    = quote.get("pc")
-
         if price and price > 0:
-            snapshot = PriceSnapshot(
-                symbol=symbol.upper(),
-                asset_class="equity",
-                price=price,
-                volume=None,
-                timestamp=now_et(),
-                is_delayed=True
-            )
-            db.add(snapshot)
+            db.add(PriceSnapshot(
+                symbol=symbol.upper(), asset_class="equity",
+                price=price, volume=None,
+                timestamp=now_et(), is_delayed=True
+            ))
             db.commit()
-
         return {
             "symbol":     symbol.upper(),
             "price":      price,
@@ -205,14 +193,9 @@ def trigger_risk(db: Session = Depends(get_db)):
 @app.post("/ingest/symbol/{symbol}")
 def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
     s = symbol.upper()
-
     ingest_price_snapshot(db, s)
-
-    print(f"[Seed] Fetching real historical data for {s}...")
     candles = get_historical_candles(s, days=60)
-
     if candles:
-        print(f"[Seed] Got {len(candles)} real candles for {s}")
         for c in candles:
             existing = db.query(PriceSnapshot).filter_by(
                 symbol=s, timestamp=c["timestamp"]
@@ -224,17 +207,9 @@ def ingest_single_symbol(symbol: str, db: Session = Depends(get_db)):
                     timestamp=c["timestamp"], is_delayed=True
                 ))
         db.commit()
-    else:
-        print(f"[Seed] No Finnhub daily data for {s}")
-
-    print(f"[Seed] Fetching intraday candles for {s}...")
-    intraday = store_intraday_for_symbol(db, s)
-    if not intraday:
-        print(f"[Seed] No intraday data for {s} — will populate on next market open")
-
+    store_intraday_for_symbol(db, s)
     compute_and_store_risk(db, s)
     ingest_sentiment(db, s)
-
     return {"status": "done", "symbol": s}
 
 
@@ -245,20 +220,13 @@ def seed_history(
 ):
     symbols = get_active_symbols_list(db)
     seeded  = []
-
     for symbol in symbols:
         existing_count = db.query(PriceSnapshot).filter_by(symbol=symbol).count()
-
         if existing_count > 100 and not force:
-            print(f"[Seed] {symbol} has {existing_count} snapshots, use force=true to reseed")
             continue
-
         db.query(PriceSnapshot).filter_by(symbol=symbol).delete()
         db.commit()
-        print(f"[Seed] Cleared {existing_count} snapshots for {symbol}")
-
         candles = get_historical_candles(symbol, days=60)
-
         if candles:
             for c in candles:
                 db.add(PriceSnapshot(
@@ -268,36 +236,26 @@ def seed_history(
                 ))
             db.commit()
         else:
-            print(f"[Seed] No Finnhub data for {symbol}, skipping")
             seeded.append(f"{symbol}(skipped)")
             continue
-
         intraday = store_intraday_for_symbol(db, symbol)
-        count_str = f"{len(candles)} daily"
-        if intraday:
-            count_str += f" + {len(intraday)} intraday"
-        seeded.append(f"{symbol}({count_str})")
-
+        seeded.append(f"{symbol}({len(candles)} daily + {len(intraday) if intraday else 0} intraday)")
     for symbol in symbols:
         try:
             compute_and_store_risk(db, symbol)
         except Exception as e:
-            print(f"[Seed] Risk failed for {symbol}: {e}")
-
+            pass
     return {"status": "done", "seeded": seeded}
 
 
 @app.post("/ingest/force-reseed/{symbol}")
 def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
     s = symbol.upper()
-
     count = db.query(PriceSnapshot).filter_by(symbol=s).count()
     db.query(PriceSnapshot).filter_by(symbol=s).delete()
     db.commit()
-
     candles = get_historical_candles(s, days=90)
     daily_count = 0
-
     if candles:
         for c in candles:
             db.add(PriceSnapshot(
@@ -307,22 +265,16 @@ def force_reseed_symbol(symbol: str, db: Session = Depends(get_db)):
             ))
         db.commit()
         daily_count = len(candles)
-
     intraday = store_intraday_for_symbol(db, s)
-    intraday_count = len(intraday) if intraday else 0
-
     ingest_price_snapshot(db, s)
     compute_and_store_risk(db, s)
-
     total = db.query(PriceSnapshot).filter_by(symbol=s).count()
-
     return {
-        "symbol":           s,
-        "deleted":          count,
-        "daily_candles":    daily_count,
-        "intraday_candles": intraday_count,
-        "total_snapshots":  total,
-        "finnhub_data":     daily_count > 0
+        "symbol": s, "deleted": count,
+        "daily_candles": daily_count,
+        "intraday_candles": len(intraday) if intraday else 0,
+        "total_snapshots": total,
+        "finnhub_data": daily_count > 0
     }
 
 
@@ -333,12 +285,9 @@ def list_earnings(db: Session = Depends(get_db)):
              .limit(50).all()
     return [
         {
-            "symbol":       r.symbol,
-            "company":      r.company_name,
-            "date":         str(r.report_date),
-            "eps_estimate": r.eps_estimate,
-            "eps_actual":   r.eps_actual,
-            "surprise_pct": r.surprise_pct
+            "symbol": r.symbol, "company": r.company_name,
+            "date": str(r.report_date), "eps_estimate": r.eps_estimate,
+            "eps_actual": r.eps_actual, "surprise_pct": r.surprise_pct
         }
         for r in rows
     ]
@@ -373,22 +322,32 @@ def get_risk(symbol: str, db: Session = Depends(get_db)):
             .order_by(RiskMetric.computed_at.desc())\
             .first()
     if not row:
-        return {"symbol": symbol, "var_95": None, "volatility_30d": None, "beta": None, "sharpe": None, "alpha": None}
+        return {"symbol": symbol, "var_95": None, "volatility_30d": None,
+                "beta": None, "sharpe": None, "alpha": None,
+                "var_99": None, "max_drawdown": None, "sortino": None}
 
     price_rows = db.query(PriceSnapshot)\
                    .filter_by(symbol=symbol.upper())\
                    .order_by(PriceSnapshot.timestamp.asc()).all()
-    prices  = [r.price for r in price_rows]
+    from collections import OrderedDict
+    daily = OrderedDict()
+    for r in price_rows:
+        daily[r.timestamp.strftime("%Y-%m-%d")] = r.price
+    prices  = list(daily.values())
     returns = calculate_returns(prices) if len(prices) >= 3 else []
     sharpe  = calculate_sharpe(returns) if returns else None
+    sortino = calculate_sortino(returns) if returns else None
 
     return {
         "symbol":         row.symbol,
         "var_95":         row.var_95,
+        "var_99":         row.var_99,
         "volatility_30d": row.volatility_30d,
         "beta":           row.beta,
         "alpha":          row.alpha,
+        "max_drawdown":   row.max_drawdown,
         "sharpe":         sharpe,
+        "sortino":        sortino,
         "computed_at":    str(row.computed_at)
     }
 
@@ -411,16 +370,24 @@ def get_all_risk(
         price_rows = db.query(PriceSnapshot)\
                        .filter_by(symbol=symbol)\
                        .order_by(PriceSnapshot.timestamp.asc()).all()
-        prices  = [r.price for r in price_rows]
+        from collections import OrderedDict
+        daily = OrderedDict()
+        for r in price_rows:
+            daily[r.timestamp.strftime("%Y-%m-%d")] = r.price
+        prices  = list(daily.values())
         returns = calculate_returns(prices) if len(prices) >= 3 else []
         sharpe  = calculate_sharpe(returns) if returns else None
+        sortino = calculate_sortino(returns) if returns else None
         results.append({
             "symbol":         row.symbol,
             "var_95":         row.var_95,
+            "var_99":         row.var_99,
             "volatility_30d": row.volatility_30d,
             "beta":           row.beta,
             "alpha":          row.alpha,
+            "max_drawdown":   row.max_drawdown,
             "sharpe":         sharpe,
+            "sortino":        sortino,
         })
     return results
 
@@ -435,11 +402,26 @@ def get_expected_move(
             .filter_by(symbol=symbol.upper())\
             .order_by(RiskMetric.computed_at.desc())\
             .first()
-    price_row = db.query(PriceSnapshot)\
+    if not row:
+        return {"symbol": symbol, "error": "insufficient data"}
+
+    # FIX: Use previous trading day's closing price (16:00 ET) for expected move
+    # so it doesn't change with every live price update during the day
+    prev_close_row = db.query(PriceSnapshot)\
+                       .filter_by(symbol=symbol.upper())\
+                       .filter(PriceSnapshot.timestamp <= datetime.now(ET).replace(
+                           hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+                       ))\
+                       .order_by(PriceSnapshot.timestamp.desc())\
+                       .first()
+
+    # Fallback to latest price if no previous close found
+    price_row = prev_close_row or db.query(PriceSnapshot)\
                   .filter_by(symbol=symbol.upper())\
                   .order_by(PriceSnapshot.timestamp.desc())\
                   .first()
-    if not row or not price_row:
+
+    if not price_row:
         return {"symbol": symbol, "error": "insufficient data"}
 
     move = calculate_expected_move(price_row.price, row.volatility_30d, days)
@@ -471,16 +453,39 @@ def get_position_size(
                   .first()
     if not row or not price_row:
         return {"symbol": symbol, "error": "insufficient data"}
-
     sizing = calculate_position_size(portfolio, price_row.price, row.var_95, risk_pct)
     return {
-        "symbol":           symbol,
-        "portfolio_value":  portfolio,
-        "risk_pct_input":   risk_pct * 100,
-        "price":            price_row.price,
-        "var_95_per_share": row.var_95,
-        **sizing
+        "symbol": symbol, "portfolio_value": portfolio,
+        "risk_pct_input": risk_pct * 100, "price": price_row.price,
+        "var_95_per_share": row.var_95, **sizing
     }
+
+
+@app.get("/correlation")
+def get_correlation(
+    symbols: str = Query(default=None),
+    db: Session = Depends(get_db)
+):
+    """Correlation matrix between all watchlist symbols."""
+    target = symbols.split(",") if symbols else get_active_symbols_list(db)
+    from collections import OrderedDict
+    symbols_returns = {}
+    for symbol in target:
+        symbol = symbol.strip().upper()
+        price_rows = db.query(PriceSnapshot)\
+                       .filter_by(symbol=symbol)\
+                       .order_by(PriceSnapshot.timestamp.asc()).all()
+        daily = OrderedDict()
+        for r in price_rows:
+            daily[r.timestamp.strftime("%Y-%m-%d")] = r.price
+        prices = list(daily.values())
+        if len(prices) >= 5:
+            symbols_returns[symbol] = calculate_returns(prices)
+
+    if len(symbols_returns) < 2:
+        return {"error": "need at least 2 symbols with data"}
+
+    return calculate_correlation_matrix(symbols_returns)
 
 
 @app.get("/scheduler/status")

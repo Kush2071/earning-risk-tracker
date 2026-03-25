@@ -43,7 +43,10 @@ class RiskMetric(Base):
     id             = Column(Integer, primary_key=True, index=True)
     symbol         = Column(String, index=True)
     var_95         = Column(Float, nullable=True)
+    var_99         = Column(Float, nullable=True)   # VaR at 99% confidence
     volatility_30d = Column(Float, nullable=True)
     beta           = Column(Float, nullable=True)
-    alpha          = Column(Float, nullable=True)  # Added: Jensen's Alpha vs S&P 500
+    alpha          = Column(Float, nullable=True)
+    max_drawdown   = Column(Float, nullable=True)   # Max peak-to-trough loss %
+    sortino        = Column(Float, nullable=True)   # Sortino ratio
     computed_at    = Column(DateTime, server_default=func.now())

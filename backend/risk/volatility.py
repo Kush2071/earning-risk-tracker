@@ -1,24 +1,24 @@
 import math
 import httpx
 from collections import OrderedDict
-from typing import List
+from typing import List, Dict
 from sqlalchemy.orm import Session
 from db.models import PriceSnapshot, RiskMetric
 from datetime import datetime, timedelta
 
-# Alpha Vantage key for fetching SPY benchmark data
+# Alpha Vantage for SPY benchmark
 AV_BASE = "https://www.alphavantage.co/query"
 AV_KEY  = "NTMC4940Y5O7O5AV"
 
-# Cache SPY returns so we don't fetch on every risk compute
+# Cache SPY returns — refresh once per day
 _spy_returns_cache = {"returns": None, "fetched_at": None}
 SPY_CACHE_TTL_HOURS = 24
 
 
 def get_spy_returns() -> List[float]:
     """
-    Fetch S&P 500 (SPY ETF) daily returns from Alpha Vantage.
-    Cached for 24 hours to avoid hitting API rate limits.
+    Fetch SPY daily returns from Alpha Vantage.
+    Cached 24hrs to stay within 25 calls/day free tier limit.
     """
     global _spy_returns_cache
 
@@ -47,17 +47,14 @@ def get_spy_returns() -> List[float]:
         if not time_series:
             return []
 
-        prices = [
-            float(v["4. close"])
-            for _, v in sorted(time_series.items())
-        ]
+        prices  = [float(v["4. close"]) for _, v in sorted(time_series.items())]
         returns = calculate_returns(prices)
 
         _spy_returns_cache["returns"]    = returns
         _spy_returns_cache["fetched_at"] = now
         return returns
 
-    except Exception as e:
+    except Exception:
         return []
 
 
@@ -87,9 +84,63 @@ def calculate_volatility(returns: List[float]) -> float:
 def calculate_var_95(returns: List[float], price: float) -> float:
     if len(returns) < 10:
         return 0.0
-    sorted_returns = sorted(returns)
-    index          = max(int(len(sorted_returns) * 0.05), 1)
-    return round(abs(sorted_returns[index] * price), 4)
+    sorted_r = sorted(returns)
+    index    = max(int(len(sorted_r) * 0.05), 1)
+    return round(abs(sorted_r[index] * price), 4)
+
+
+def calculate_var_99(returns: List[float], price: float) -> float:
+    """VaR at 99% confidence — more conservative than 95%."""
+    if len(returns) < 10:
+        return 0.0
+    sorted_r = sorted(returns)
+    index    = max(int(len(sorted_r) * 0.01), 1)
+    return round(abs(sorted_r[index] * price), 4)
+
+
+def calculate_max_drawdown(prices: List[float]) -> float:
+    """
+    Maximum drawdown — largest peak-to-trough decline in %.
+    Tells you the worst loss from a peak you would have suffered.
+    e.g. -25.3 means the stock fell 25.3% from its peak at some point.
+    """
+    if len(prices) < 2:
+        return 0.0
+    peak         = prices[0]
+    max_drawdown = 0.0
+    for price in prices:
+        if price > peak:
+            peak = price
+        drawdown = (price - peak) / peak
+        if drawdown < max_drawdown:
+            max_drawdown = drawdown
+    return round(max_drawdown * 100, 4)  # as percentage
+
+
+def calculate_sortino(returns: List[float], risk_free_rate: float = 0.05) -> float:
+    """
+    Sortino ratio — like Sharpe but only penalizes DOWNSIDE volatility.
+    Better measure for risk-adjusted return since investors only care
+    about downside risk, not upside volatility.
+    Sortino > 1 = good, > 2 = very good.
+    """
+    if len(returns) < 2:
+        return 0.0
+    n           = len(returns)
+    mean_daily  = sum(returns) / n
+    mean_annual = mean_daily * 252
+
+    # Only negative returns contribute to downside deviation
+    downside = [r for r in returns if r < 0]
+    if len(downside) < 2:
+        return 0.0
+
+    downside_std   = math.sqrt(sum(r ** 2 for r in downside) / len(downside))
+    downside_annual = downside_std * math.sqrt(252)
+
+    if downside_annual == 0:
+        return 0.0
+    return round((mean_annual - risk_free_rate) / downside_annual, 4)
 
 
 def calculate_beta(stock_returns: List[float], market_returns: List[float]) -> float:
@@ -112,24 +163,19 @@ def calculate_alpha(
     risk_free_rate: float = 0.05
 ) -> float:
     """
-    Jensen's Alpha — how much a stock outperforms vs what Beta predicts.
+    Jensen's Alpha — outperformance vs what Beta predicts.
     Positive = beat market on risk-adjusted basis.
-    Returns annualised alpha as a percentage.
+    Returns annualised alpha as percentage.
     """
     n = min(len(stock_returns), len(market_returns))
     if n < 5 or beta is None:
         return 0.0
-
     s = stock_returns[:n]
     m = market_returns[:n]
-
     mean_stock  = (sum(s) / n) * 252
     mean_market = (sum(m) / n) * 252
-
-    expected_return = risk_free_rate + beta * (mean_market - risk_free_rate)
-    alpha = mean_stock - expected_return
-
-    return round(alpha * 100, 4)
+    expected    = risk_free_rate + beta * (mean_market - risk_free_rate)
+    return round((mean_stock - expected) * 100, 4)
 
 
 def calculate_sharpe(returns: List[float], risk_free_rate: float = 0.05) -> float:
@@ -144,6 +190,39 @@ def calculate_sharpe(returns: List[float], risk_free_rate: float = 0.05) -> floa
     if annual_vol == 0:
         return 0.0
     return round((mean_annual - risk_free_rate) / annual_vol, 4)
+
+
+def calculate_correlation_matrix(symbols_returns: Dict[str, List[float]]) -> Dict[str, Dict[str, float]]:
+    """
+    Correlation matrix between all symbols.
+    Shows how stocks move together — useful for diversification.
+    +1 = perfect correlation, 0 = no correlation, -1 = inverse.
+    """
+    matrix = {}
+    symbols = list(symbols_returns.keys())
+
+    for s1 in symbols:
+        matrix[s1] = {}
+        for s2 in symbols:
+            r1 = symbols_returns[s1]
+            r2 = symbols_returns[s2]
+            n  = min(len(r1), len(r2))
+            if n < 5:
+                matrix[s1][s2] = 1.0 if s1 == s2 else 0.0
+                continue
+            a = r1[:n]
+            b = r2[:n]
+            mean_a = sum(a) / n
+            mean_b = sum(b) / n
+            cov    = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(n)) / (n - 1)
+            std_a  = math.sqrt(sum((x - mean_a) ** 2 for x in a) / (n - 1))
+            std_b  = math.sqrt(sum((x - mean_b) ** 2 for x in b) / (n - 1))
+            if std_a == 0 or std_b == 0:
+                matrix[s1][s2] = 1.0 if s1 == s2 else 0.0
+            else:
+                matrix[s1][s2] = round(cov / (std_a * std_b), 4)
+
+    return matrix
 
 
 def calculate_expected_move(price: float, volatility: float, days_to_earnings: int = 1) -> dict:
@@ -165,12 +244,10 @@ def calculate_position_size(
 ) -> dict:
     if var_95 == 0 or price == 0:
         return {"shares": 0, "position_value": 0.0, "risk_dollar": 0.0}
-
     max_risk_dollar = portfolio_value * risk_pct
     shares          = int(max_risk_dollar / var_95)
     position_value  = round(shares * price, 2)
     risk_dollar     = round(shares * var_95, 2)
-
     return {
         "shares":          shares,
         "position_value":  position_value,
@@ -186,8 +263,7 @@ def compute_and_store_risk(db: Session, symbol: str):
              .all()
 
     # Deduplicate to one price per day (last price of each day)
-    # This ensures returns are daily returns not intraday noise
-    # which was causing unrealistic alpha/beta/sharpe values
+    # This ensures returns are daily returns, not intraday noise
     daily = OrderedDict()
     for r in rows:
         date_key = r.timestamp.strftime("%Y-%m-%d")
@@ -200,16 +276,20 @@ def compute_and_store_risk(db: Session, symbol: str):
     returns = calculate_returns(prices)
     vol     = calculate_volatility(returns)
     var_95  = calculate_var_95(returns, prices[-1])
+    var_99  = calculate_var_99(returns, prices[-1])
     sharpe  = calculate_sharpe(returns)
+    sortino = calculate_sortino(returns)
+    max_dd  = calculate_max_drawdown(prices)
 
-    # Get SPY benchmark returns (cached, fetched from Alpha Vantage)
+    # SPY benchmark for alpha/beta
     spy_returns = get_spy_returns()
-
-    # Fallback to SPY in DB if Alpha Vantage fails
     if not spy_returns:
         spy_rows    = db.query(PriceSnapshot).filter_by(symbol="SPY")\
                        .order_by(PriceSnapshot.timestamp.asc()).all()
-        spy_prices  = [r.price for r in spy_rows]
+        spy_daily   = OrderedDict()
+        for r in spy_rows:
+            spy_daily[r.timestamp.strftime("%Y-%m-%d")] = r.price
+        spy_prices  = list(spy_daily.values())
         spy_returns = calculate_returns(spy_prices) if len(spy_prices) >= 3 else []
 
     beta  = calculate_beta(returns, spy_returns)  if len(spy_returns) >= 5 else 1.0
@@ -218,11 +298,19 @@ def compute_and_store_risk(db: Session, symbol: str):
     record = RiskMetric(
         symbol=symbol,
         var_95=var_95,
+        var_99=var_99,
         volatility_30d=vol,
         beta=beta,
         alpha=alpha,
+        max_drawdown=max_dd,
+        sortino=sortino,
         computed_at=datetime.utcnow()
     )
     db.add(record)
     db.commit()
-    return {"vol": vol, "var_95": var_95, "beta": beta, "alpha": alpha, "sharpe": sharpe, "price": prices[-1]}
+    return {
+        "vol": vol, "var_95": var_95, "var_99": var_99,
+        "beta": beta, "alpha": alpha, "sharpe": sharpe,
+        "sortino": sortino, "max_drawdown": max_dd,
+        "price": prices[-1]
+    }

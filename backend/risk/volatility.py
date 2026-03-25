@@ -191,21 +191,22 @@ def calculate_position_size(
 
 
 def compute_and_store_risk(db: Session, symbol: str):
+    def compute_and_store_risk(db: Session, symbol: str):
     rows = db.query(PriceSnapshot)\
              .filter_by(symbol=symbol)\
              .order_by(PriceSnapshot.timestamp.asc())\
              .all()
 
-   # Deduplicate to one price per day (last price of each day)
-# This ensures returns are daily returns, not intraday noise
-from collections import OrderedDict
-daily = OrderedDict()
-for r in rows:
-    date_key = r.timestamp.strftime("%Y-%m-%d")
-    daily[date_key] = r.price  # keeps last price for each day
-prices = list(daily.values())
+    # Deduplicate to one price per day (last price of each day)
+    # This ensures returns are daily returns, not intraday noise
+    from collections import OrderedDict
+    daily = OrderedDict()
+    for r in rows:
+        date_key = r.timestamp.strftime("%Y-%m-%d")
+        daily[date_key] = r.price
+    prices = list(daily.values())
+
     if len(prices) < 3:
-        print(f"[Risk] {symbol}: not enough data ({len(prices)} snapshots), skipping")
         return
 
     returns = calculate_returns(prices)
@@ -213,10 +214,7 @@ prices = list(daily.values())
     var_95  = calculate_var_95(returns, prices[-1])
     sharpe  = calculate_sharpe(returns)
 
-    # Get SPY benchmark returns (cached, fetched from Alpha Vantage)
     spy_returns = get_spy_returns()
-
-    # Also check DB for SPY as fallback
     if not spy_returns:
         spy_rows   = db.query(PriceSnapshot).filter_by(symbol="SPY")\
                       .order_by(PriceSnapshot.timestamp.asc()).all()

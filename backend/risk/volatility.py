@@ -1,5 +1,6 @@
 import math
 import httpx
+from collections import OrderedDict
 from typing import List
 from sqlalchemy.orm import Session
 from db.models import PriceSnapshot, RiskMetric
@@ -11,13 +12,12 @@ AV_KEY  = "NTMC4940Y5O7O5AV"
 
 # Cache SPY returns so we don't fetch on every risk compute
 _spy_returns_cache = {"returns": None, "fetched_at": None}
-SPY_CACHE_TTL_HOURS = 24  # refresh once a day
+SPY_CACHE_TTL_HOURS = 24
 
 
 def get_spy_returns() -> List[float]:
     """
     Fetch S&P 500 (SPY ETF) daily returns from Alpha Vantage.
-    Used as market benchmark for Alpha and Beta calculations.
     Cached for 24 hours to avoid hitting API rate limits.
     """
     global _spy_returns_cache
@@ -44,17 +44,20 @@ def get_spy_returns() -> List[float]:
         data        = resp.json()
         time_series = data.get("Time Series (Daily)")
 
+        if not time_series:
+            return []
+
         prices = [
             float(v["4. close"])
             for _, v in sorted(time_series.items())
         ]
         returns = calculate_returns(prices)
 
-        _spy_returns_cache["returns"]   = returns
+        _spy_returns_cache["returns"]    = returns
         _spy_returns_cache["fetched_at"] = now
-       
+        return returns
+
     except Exception as e:
-        print(f"[SPY] Failed to fetch benchmark data: {e}")
         return []
 
 
@@ -67,18 +70,15 @@ def calculate_returns(prices: List[float]) -> List[float]:
 
 
 def calculate_volatility(returns: List[float]) -> float:
-    """
-    Annualised volatility from daily log returns.
-    Filters out extreme returns that come from synthetic/bad data.
-    """
+    """Annualised volatility from daily log returns."""
     if len(returns) < 2:
         return 0.0
     filtered = [r for r in returns if abs(r) < 0.15]
     if len(filtered) < 2:
         filtered = returns
-    n    = len(filtered)
-    mean = sum(filtered) / n
-    var  = sum((r - mean) ** 2 for r in filtered) / (n - 1)
+    n     = len(filtered)
+    mean  = sum(filtered) / n
+    var   = sum((r - mean) ** 2 for r in filtered) / (n - 1)
     daily = math.sqrt(var)
     ann   = round(daily * math.sqrt(252), 6)
     return min(ann, 1.50)
@@ -96,12 +96,12 @@ def calculate_beta(stock_returns: List[float], market_returns: List[float]) -> f
     n = min(len(stock_returns), len(market_returns))
     if n < 5:
         return 1.0
-    s = stock_returns[:n]
-    m = market_returns[:n]
+    s      = stock_returns[:n]
+    m      = market_returns[:n]
     mean_s = sum(s) / n
     mean_m = sum(m) / n
-    cov = sum((s[i] - mean_s) * (m[i] - mean_m) for i in range(n)) / (n - 1)
-    var = sum((m[i] - mean_m) ** 2 for i in range(n)) / (n - 1)
+    cov    = sum((s[i] - mean_s) * (m[i] - mean_m) for i in range(n)) / (n - 1)
+    var    = sum((m[i] - mean_m) ** 2 for i in range(n)) / (n - 1)
     return round(cov / var, 4) if var != 0 else 1.0
 
 
@@ -112,16 +112,9 @@ def calculate_alpha(
     risk_free_rate: float = 0.05
 ) -> float:
     """
-    Jensen's Alpha — measures how much a stock outperforms or underperforms
-    what would be expected given its Beta and the market return.
-
-    Formula: Alpha = Stock Return - [Risk Free Rate + Beta × (Market Return - Risk Free Rate)]
-
-    Positive alpha = stock beat the market on a risk-adjusted basis
-    Negative alpha = stock underperformed vs what its beta predicts
-    Zero alpha     = performed exactly as expected given market exposure
-
-    Returns annualised alpha as a percentage (e.g. 2.5 = +2.5% above expected).
+    Jensen's Alpha — how much a stock outperforms vs what Beta predicts.
+    Positive = beat market on risk-adjusted basis.
+    Returns annualised alpha as a percentage.
     """
     n = min(len(stock_returns), len(market_returns))
     if n < 5 or beta is None:
@@ -130,21 +123,17 @@ def calculate_alpha(
     s = stock_returns[:n]
     m = market_returns[:n]
 
-    # Annualise mean daily returns
     mean_stock  = (sum(s) / n) * 252
     mean_market = (sum(m) / n) * 252
 
-    # Jensen's Alpha
     expected_return = risk_free_rate + beta * (mean_market - risk_free_rate)
     alpha = mean_stock - expected_return
 
-    return round(alpha * 100, 4)  # return as percentage
+    return round(alpha * 100, 4)
 
 
 def calculate_sharpe(returns: List[float], risk_free_rate: float = 0.05) -> float:
-    """
-    Annualised Sharpe ratio.
-    """
+    """Annualised Sharpe ratio."""
     if len(returns) < 2:
         return 0.0
     n           = len(returns)
@@ -191,15 +180,14 @@ def calculate_position_size(
 
 
 def compute_and_store_risk(db: Session, symbol: str):
-    def compute_and_store_risk(db: Session, symbol: str):
     rows = db.query(PriceSnapshot)\
              .filter_by(symbol=symbol)\
              .order_by(PriceSnapshot.timestamp.asc())\
              .all()
 
     # Deduplicate to one price per day (last price of each day)
-    # This ensures returns are daily returns, not intraday noise
-    from collections import OrderedDict
+    # This ensures returns are daily returns not intraday noise
+    # which was causing unrealistic alpha/beta/sharpe values
     daily = OrderedDict()
     for r in rows:
         date_key = r.timestamp.strftime("%Y-%m-%d")
@@ -214,11 +202,14 @@ def compute_and_store_risk(db: Session, symbol: str):
     var_95  = calculate_var_95(returns, prices[-1])
     sharpe  = calculate_sharpe(returns)
 
+    # Get SPY benchmark returns (cached, fetched from Alpha Vantage)
     spy_returns = get_spy_returns()
+
+    # Fallback to SPY in DB if Alpha Vantage fails
     if not spy_returns:
-        spy_rows   = db.query(PriceSnapshot).filter_by(symbol="SPY")\
-                      .order_by(PriceSnapshot.timestamp.asc()).all()
-        spy_prices = [r.price for r in spy_rows]
+        spy_rows    = db.query(PriceSnapshot).filter_by(symbol="SPY")\
+                       .order_by(PriceSnapshot.timestamp.asc()).all()
+        spy_prices  = [r.price for r in spy_rows]
         spy_returns = calculate_returns(spy_prices) if len(spy_prices) >= 3 else []
 
     beta  = calculate_beta(returns, spy_returns)  if len(spy_returns) >= 5 else 1.0

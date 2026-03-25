@@ -1,3 +1,4 @@
+from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.schedulers.base import SchedulerAlreadyRunningError
@@ -56,7 +57,7 @@ def store_closing_prices():
                         asset_class="equity",
                         price=price,
                         volume=None,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None),
                         is_delayed=False
                     )
                     db.add(snapshot)

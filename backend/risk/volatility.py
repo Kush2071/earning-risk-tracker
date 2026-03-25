@@ -196,7 +196,14 @@ def compute_and_store_risk(db: Session, symbol: str):
              .order_by(PriceSnapshot.timestamp.asc())\
              .all()
 
-    prices = [r.price for r in rows]
+   # Deduplicate to one price per day (last price of each day)
+# This ensures returns are daily returns, not intraday noise
+from collections import OrderedDict
+daily = OrderedDict()
+for r in rows:
+    date_key = r.timestamp.strftime("%Y-%m-%d")
+    daily[date_key] = r.price  # keeps last price for each day
+prices = list(daily.values())
     if len(prices) < 3:
         print(f"[Risk] {symbol}: not enough data ({len(prices)} snapshots), skipping")
         return
